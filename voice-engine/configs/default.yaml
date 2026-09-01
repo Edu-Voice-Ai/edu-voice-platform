@@ -1,0 +1,80 @@
+# WARNING: This file is NOT loaded at runtime. Real config lives in app/core/config.py (env vars / .env). Kept for reference only.
+# Default Voice Engine Configuration
+app:
+  name: "Edu-Voice Realtime Engine"
+  version: "0.1.0"
+  env: "development"
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  ws_endpoint: "/ws/voice"
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  sample_width_bytes: 2 # 16-bit PCM
+  frame_duration_ms: 20
+  chunk_samples: 320    # 16000 * 0.02
+
+vad:
+  provider: "silero"
+  threshold: 0.5
+  min_speech_duration_ms: 100
+  min_silence_duration_ms: 500
+  speech_pad_ms: 30
+
+turn_detection:
+  normal_silence_ms: 500
+  language_selection_silence_ms: 500
+  structured_input_silence_ms: 1200
+  numeric_input_silence_ms: 1200
+  phone_number_min_digits: 10
+  phone_number_max_digits: 15
+
+barge_in:
+  confirmation_ms: 80
+  acknowledgment_enabled: false
+
+conversation:
+  response_style: "concise" # concise, normal, detailed
+  max_sentences: 2
+  max_chars_soft: 180
+
+stt:
+  provider: "sarvam"
+  model: "saaras:v3"
+  language: "unknown" # Auto-detect English, Hindi, Telugu, code-mix
+
+llm:
+  provider: "sarvam"
+  model: "sarvam-105b-conversations"
+  temperature: 0.2
+  max_tokens: 250
+  reasoning_effort: null
+
+tts:
+  provider: "sarvam"
+  model: "bulbul:v3"
+  speaker: "priya"
+  pace: 1.0
+  chunking:
+    min_chars: 60
+    max_chars: 250
+    sentence_delimiters: [".", "!", "?", "।", "\n"]
+
+rag:
+  enabled: true
+  use_mock: true
+  top_k: 3
+
+admission_ai:
+  institution_name: "Apex University"
+  agent_name: "Priya"
+  default_language: "en-IN"
+
+languages:
+  supported:
+    - en-IN
+    - hi-IN
+    - te-IN
