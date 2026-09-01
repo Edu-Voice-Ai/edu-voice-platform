@@ -129,6 +129,7 @@ class SarvamTTSProvider(TTSProvider):
         # 1. Text segmenter task: extracts clean sentences from LLM token stream without mid-word splits
         async def segmenter():
             buf = ""
+            is_first_chunk = True
             try:
                 async for delta in text_stream:
                     if cancellation_token and cancellation_token.is_cancelled:
@@ -137,11 +138,13 @@ class SarvamTTSProvider(TTSProvider):
                     while True:
                         seg, buf = SpeechTextNormalizer.extract_safe_chunk(
                             buf,
-                            min_chars=min(self.min_chars, 6),
+                            min_chars=6 if is_first_chunk else self.min_chars,
                             max_chars=self.max_chars,
-                            is_eof=False
+                            is_eof=False,
+                            is_first_chunk=is_first_chunk
                         )
                         if seg:
+                            is_first_chunk = False
                             await segment_queue.put(seg)
                         else:
                             break
@@ -149,9 +152,10 @@ class SarvamTTSProvider(TTSProvider):
                 if not (cancellation_token and cancellation_token.is_cancelled):
                     final_seg, _ = SpeechTextNormalizer.extract_safe_chunk(
                         buf,
-                        min_chars=self.min_chars,
+                        min_chars=6 if is_first_chunk else self.min_chars,
                         max_chars=self.max_chars,
-                        is_eof=True
+                        is_eof=True,
+                        is_first_chunk=is_first_chunk
                     )
                     if final_seg:
                         await segment_queue.put(final_seg)

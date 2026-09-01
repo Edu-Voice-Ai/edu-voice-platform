@@ -74,10 +74,15 @@ class SpeechTextNormalizer:
         tokens = stripped.split()
         if tokens:
             last_word = tokens[-1].strip(".,!?:;\"'")
-            if len(tokens) == 1 and last_word.istitle() and len(last_word) > 1:
-                return False
             if last_word.lower() in ["mr", "ms", "dr", "sri", "prof", "గౌరవనీయ", "డాక్టర్", "శ్రీ"]:
                 return False
+            if len(tokens) == 1:
+                # If single word has clause/sentence punctuation (e.g. 'Sure,', 'Hello!', 'Yes.'), it's safe
+                if stripped[-1] in [",", ".", "!", "?", "।", ":", ";"]:
+                    return True
+                # Unpunctuated single title word (e.g. 'Aravind') should wait for last name
+                if last_word.istitle() and len(last_word) > 1:
+                    return False
 
         return True
 
@@ -87,11 +92,14 @@ class SpeechTextNormalizer:
         buffer: str,
         min_chars: int = 12,
         max_chars: int = 250,
-        is_eof: bool = False
+        is_eof: bool = False,
+        is_first_chunk: bool = False
     ) -> tuple[str | None, str]:
         """
         Extracts a safe linguistic chunk from the text buffer.
         NEVER splits inside a word, acronym, name, or course title.
+        When is_first_chunk is True, extracts the first natural opening clause (6-28 chars)
+        as early as possible to minimize time-to-first-audio.
         
         Returns:
             (extracted_chunk, remaining_buffer)
@@ -113,13 +121,32 @@ class SpeechTextNormalizer:
         # 1. Sentence boundaries (. ! ? । \n), Clause boundaries (, ; : —), or Indic conjunction connectors
         # Clauses must be followed by whitespace and not preceded by digits to prevent breaking numbers like 1,50,000
         for m in re.finditer(r'(?:([.!?।\n])(?:\s+|$)|(?<!\d)([,;:—])\s+|(?<=\S)\s+(మరియు|లేదా)\s+)', working_buffer):
-            end_pos = m.end()
+            is_connector = bool(m.group(3))
+            end_pos = m.start() if is_connector else m.end()
             candidate = cls.normalize_for_speech(working_buffer[:end_pos].strip())
             delimiter = m.group(1) or m.group(2) or m.group(3)
-            min_boundary_len = min(min_chars, 6) if delimiter in ".!?।\n" else min_chars
-            if len(candidate) >= min_boundary_len and cls.is_safe_chunk_boundary(candidate):
-                remaining = working_buffer[end_pos:].lstrip()
-                return candidate, remaining
+            min_boundary_len = 3 if is_first_chunk else (min(min_chars, 6) if delimiter in ".!?।\n" else min_chars)
+            
+            # If is_first_chunk and a natural delimiter was found before 40 chars, extract immediately
+            if is_first_chunk:
+                if len(candidate) >= min_boundary_len and len(candidate) <= 40 and cls.is_safe_chunk_boundary(candidate):
+                    remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
+                    return candidate, remaining
+            else:
+                if len(candidate) >= min_boundary_len and cls.is_safe_chunk_boundary(candidate):
+                    remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
+                    return candidate, remaining
+
+        # 1b. For the very first chunk without early punctuation, if buffer reaches 28-35 chars, emit at word boundary
+        if is_first_chunk and len(working_buffer) >= 28:
+            first_slice = working_buffer[:35]
+            space_matches = list(re.finditer(r'\s+', first_slice))
+            if space_matches:
+                for sm in reversed(space_matches):
+                    candidate = cls.normalize_for_speech(working_buffer[:sm.start()].strip())
+                    if len(candidate) >= 4 and cls.is_safe_chunk_boundary(candidate):
+                        remaining = working_buffer[sm.end():].lstrip()
+                        return candidate, remaining
 
         # 2. If buffer exceeds max_chars, find safe clause or word boundary BEFORE max_chars
         if len(buffer) >= max_chars:
