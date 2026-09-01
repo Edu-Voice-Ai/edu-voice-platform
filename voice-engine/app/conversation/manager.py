@@ -7,7 +7,12 @@ from app.conversation.prompts import build_admission_system_prompt
 from app.conversation.language import (
     LanguageDetector,
     LanguagePreferenceParser,
+    ConsentResponseParser,
     INITIAL_ACKNOWLEDGMENT,
+    CONSENT_REQUEST_PROMPT,
+    CONSENT_YES_RESPONSE,
+    CONSENT_NO_RESPONSE,
+    CONSENT_AMBIGUOUS_CLARIFICATION,
     SWITCH_ACKNOWLEDGMENT,
     LANGUAGE_CLARIFICATION_PROMPT
 )
@@ -36,11 +41,60 @@ class ConversationManager:
         detected_language: Optional[str] = None
     ) -> Optional[str]:
         """
-        Evaluates user text for initial language selection, ambiguous greeting, or explicit language switching.
+        Evaluates user text for initial language selection, two-minute consent response, or explicit language switching.
         Returns:
             Optional direct acknowledgment response text if language was set/switched/clarified.
         """
-        # 1. Initial selection
+        # 1. Check for explicit mid-call language switch first
+        if session.language_selection_complete:
+            switch_lang = LanguagePreferenceParser.detect_language_switch(user_text)
+            if switch_lang and switch_lang != session.preferred_language:
+                session.preferred_language = switch_lang
+                session.language = switch_lang
+                session.waiting_for_consent = False
+                session.conversation_state = "LISTENING"
+                logger.info(f"Language switched to: {switch_lang}", extra={"session_id": session.session_id})
+                return SWITCH_ACKNOWLEDGMENT.get(switch_lang, SWITCH_ACKNOWLEDGMENT["en-IN"])
+
+        # 2. Handle Consent Evaluation if session is waiting for consent
+        if getattr(session, "waiting_for_consent", False):
+            consent_type = ConsentResponseParser.parse_consent_response(user_text)
+            active_lang = session.preferred_language or session.language or "en-IN"
+            
+            if consent_type == "YES":
+                session.waiting_for_consent = False
+                session.consent_granted = True
+                session.conversation_state = "LISTENING"
+                
+                # Check if the user combined consent with an inquiry e.g. "అవును, BTech fee ఎంత?"
+                clean = user_text.lower().strip()
+                is_specific_inquiry = any(q in clean for q in [
+                    "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility", "admission", "admissions",
+                    "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
+                    "ఫీస్", "कब", "कितना", "कोर्स"
+                ])
+                if not is_specific_inquiry:
+                    return CONSENT_YES_RESPONSE.get(active_lang, CONSENT_YES_RESPONSE["en-IN"])
+                return None
+
+            elif consent_type == "NO":
+                session.waiting_for_consent = False
+                session.consent_granted = False
+                session.conversation_state = "CLOSING"
+                return CONSENT_NO_RESPONSE.get(active_lang, CONSENT_NO_RESPONSE["en-IN"])
+
+            else:  # AMBIGUOUS
+                if not getattr(session, "consent_clarification_asked", False):
+                    session.consent_clarification_asked = True
+                    return CONSENT_AMBIGUOUS_CLARIFICATION.get(active_lang, CONSENT_AMBIGUOUS_CLARIFICATION["en-IN"])
+                else:
+                    # After 1 clarification, if still ambiguous, proceed to conversation
+                    session.waiting_for_consent = False
+                    session.consent_granted = True
+                    session.conversation_state = "LISTENING"
+                    return CONSENT_YES_RESPONSE.get(active_lang, CONSENT_YES_RESPONSE["en-IN"])
+
+        # 3. Initial selection
         if not session.language_selection_complete:
             selected_lang = LanguagePreferenceParser.parse_language_preference(user_text)
             
@@ -54,27 +108,12 @@ class ConversationManager:
             session.preferred_language = selected_lang
             session.language = selected_lang
             session.language_selection_complete = True
-            session.conversation_state = "LISTENING"
-            logger.info(f"Language preference selected: {selected_lang}", extra={"session_id": session.session_id})
+            session.waiting_for_consent = True
+            session.two_minute_permission_asked = True
+            session.conversation_state = "WAITING_FOR_TWO_MINUTE_CONSENT"
+            logger.info(f"Language preference selected: {selected_lang}, requesting two-minute consent", extra={"session_id": session.session_id})
             
-            clean = user_text.lower().strip()
-            # If the utterance contains a specific institutional fact question, let LLM/FastQueryRouter answer directly!
-            is_specific_inquiry = any(q in clean for q in [
-                "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility", "admission", "admissions",
-                "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
-                "ఫీస్", "कब", "कितना", "कोर्स"
-            ])
-            if not is_specific_inquiry:
-                return INITIAL_ACKNOWLEDGMENT.get(selected_lang, INITIAL_ACKNOWLEDGMENT["en-IN"])
-            return None
-
-        # 2. Subsequent turns: Check for explicit language switch
-        switch_lang = LanguagePreferenceParser.detect_language_switch(user_text)
-        if switch_lang and switch_lang != session.preferred_language:
-            session.preferred_language = switch_lang
-            session.language = switch_lang
-            logger.info(f"Language switched to: {switch_lang}", extra={"session_id": session.session_id})
-            return SWITCH_ACKNOWLEDGMENT.get(switch_lang, SWITCH_ACKNOWLEDGMENT["en-IN"])
+            return CONSENT_REQUEST_PROMPT.get(selected_lang, CONSENT_REQUEST_PROMPT["en-IN"])
 
         return None
 

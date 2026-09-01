@@ -75,6 +75,10 @@ class SessionState:
     
     # Conversation & Lifecycle State
     conversation_state: str = "WAITING_FOR_LANGUAGE"
+    waiting_for_consent: bool = False
+    two_minute_permission_asked: bool = False
+    consent_clarification_asked: bool = False
+    consent_granted: Optional[bool] = None
     is_greeting_playing: bool = False
     greeting_state: GreetingStateEnum = GreetingStateEnum.NOT_STARTED
     cancelled_generation_ids: set[str] = field(default_factory=set)

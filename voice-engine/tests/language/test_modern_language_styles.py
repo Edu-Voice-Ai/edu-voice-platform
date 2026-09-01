@@ -41,6 +41,6 @@ def test_hinglish_prompt_guidelines():
 
 def test_telugish_and_hinglish_acknowledgments():
     """Verify acknowledgment strings use natural Telugish and Hinglish phrasing."""
-    assert "Telugu" in INITIAL_ACKNOWLEDGMENT["te-IN"] or "course" in INITIAL_ACKNOWLEDGMENT["te-IN"]
-    assert "Hindi" in INITIAL_ACKNOWLEDGMENT["hi-IN"] or "details" in INITIAL_ACKNOWLEDGMENT["hi-IN"]
+    assert "తెలుగు" in INITIAL_ACKNOWLEDGMENT["te-IN"] or "Telugu" in INITIAL_ACKNOWLEDGMENT["te-IN"] or "course" in INITIAL_ACKNOWLEDGMENT["te-IN"]
+    assert "हिंदी" in INITIAL_ACKNOWLEDGMENT["hi-IN"] or "Hindi" in INITIAL_ACKNOWLEDGMENT["hi-IN"] or "details" in INITIAL_ACKNOWLEDGMENT["hi-IN"]
     assert "English" in INITIAL_ACKNOWLEDGMENT["en-IN"]

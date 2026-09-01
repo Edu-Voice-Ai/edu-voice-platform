@@ -24,10 +24,31 @@ LANGUAGE_STYLE_MAPPING = {
     "en-IN": "indian_english"
 }
 
-INITIAL_ACKNOWLEDGMENT = {
-    "en-IN": "Sure. We will continue in English. How can I help you with admissions today?",
-    "hi-IN": "ज़रूर, अब से हम Hindi में बात करेंगे। आपको किस course के बारे में details चाहिए?",
-    "te-IN": "సరే, ఇక నుంచి మనం Telugu లో మాట్లాడుకుందాం. మీకు ఏ course details కావాలి?"
+# Two-Minute Consent Prompts & Responses
+CONSENT_REQUEST_PROMPT = {
+    "te-IN": "సరే, ఇక నుంచి మనం తెలుగులో మాట్లాడుకుందాం. మీతో రెండు నిమిషాలు మాట్లాడవచ్చా?",
+    "hi-IN": "ठीक है, अब हम हिंदी में बात करेंगे। क्या मैं आपसे दो मिनट बात कर सकता हूँ?",
+    "en-IN": "Sure, we can continue in English. May I speak with you for two minutes?"
+}
+
+INITIAL_ACKNOWLEDGMENT = CONSENT_REQUEST_PROMPT
+
+CONSENT_YES_RESPONSE = {
+    "te-IN": "ధన్యవాదాలు. మీకు ఏ course గురించి తెలుసుకోవాలి?",
+    "hi-IN": "धन्यवाद। आप किस कोर्स के बारे में जानना चाहते हैं?",
+    "en-IN": "Thank you. Which course would you like to know about?"
+}
+
+CONSENT_NO_RESPONSE = {
+    "te-IN": "పరవాలేదు. మీ సమయం ఇచ్చినందుకు ధన్యవాదాలు. మీ రోజు శుభంగా ఉండాలి.",
+    "hi-IN": "कोई बात नहीं। आपका समय देने के लिए धन्यवाद। आपका दिन शुभ हो।",
+    "en-IN": "No problem. Thank you for your time. Have a great day."
+}
+
+CONSENT_AMBIGUOUS_CLARIFICATION = {
+    "te-IN": "మనం కొనసాగించాలనుకుంటున్నారా?",
+    "hi-IN": "क्या आप आगे बात करना चाहेंगे?",
+    "en-IN": "Would you like to continue?"
 }
 
 SWITCH_ACKNOWLEDGMENT = {
@@ -47,6 +68,78 @@ BARGE_IN_ACKNOWLEDGMENT = {
     "hi-IN": "हाँ, बोलिए.",
     "en-IN": "Yes, go ahead."
 }
+
+
+class ConsentResponseParser:
+    """Classifies user response to the two-minute consent question."""
+
+    AMBIGUOUS_MARKERS = {
+        # English
+        "maybe", "not sure", "not really", "might be", "dont know", "don't know", "can't say", "cant say",
+        # Hindi
+        "पता नहीं", "शायद", "देखते हैं", "सोचते हैं", "मालूम नहीं",
+        # Telugu
+        "ఏమో", "చూద్దాం", "తెలీదు", "తెలియదు", "చెప్పలేను", "ఆలోచిస్తా"
+    }
+
+    YES_MARKERS = {
+        # English
+        "yes", "sure", "okay", "ok", "yeah", "yup", "yes you can", "please go ahead", "go ahead", "of course",
+        "continue", "talk", "speak", "fine", "alright", "why not", "carry on",
+        # Hindi
+        "हाँ", "हां", "ठीक है", "जी हाँ", "जी हां", "हां बोलिए", "हाँ बोलिए", "ज़रूर", "जरूर", "बोलिए", "कर सकते हैं", "बात कीजिए",
+        "haan", "theek hai", "ji haan", "boliye", "zaroor", "bilkul",
+        # Telugu
+        "అవును", "సరే", "మాట్లాడండి", "అవునండి", "అవును మాట్లాడండి", "తప్పకుండా", "చెప్పండి", "హా", "మాట్లాడవచ్చు", "సరేనండి", "ఓకే",
+        "avunu", "sare", "matladandi", "avunandi", "tappakunda", "cheppandi", "haa", "ha"
+    }
+
+    NO_MARKERS = {
+        # English
+        "no", "not now", "no thank you", "no thanks", "nope", "i am busy", "busy", "don't want", "dont want", "later", "stop", "cancel", "bye",
+        # Hindi
+        "नहीं", "अभी नहीं", "ना", "नहीं चाहिए", "मत करो", "बाद में", "व्यस्त",
+        "nahi", "nahin", "abhi nahi", "na", "baad mein",
+        # Telugu
+        "వద్దు", "ఇప్పుడు వద్దు", "లేదు", "వద్దండి", "బిజీ", "తర్వాత", "ఆపండి",
+        "vaddu", "ippudu vaddu", "ledu", "vaddandi", "tarvata"
+    }
+
+    @classmethod
+    def parse_consent_response(cls, text: str) -> str:
+        """Returns 'YES', 'NO', or 'AMBIGUOUS'."""
+        clean = text.lower().strip()
+        # Normalize punctuation to spaces so 'yes, you can' -> 'yes you can'
+        norm_phrase = " ".join(re.sub(r'[^\w\s]', ' ', clean).split())
+        words = set(norm_phrase.split())
+        
+        # 1. Check Ambiguous markers first
+        for amb_word in cls.AMBIGUOUS_MARKERS:
+            norm_amb = " ".join(re.sub(r'[^\w\s]', ' ', amb_word).split())
+            if norm_amb in norm_phrase or norm_amb in words:
+                return "AMBIGUOUS"
+
+        # 2. Check NO
+        for no_word in cls.NO_MARKERS:
+            norm_no = " ".join(re.sub(r'[^\w\s]', ' ', no_word).split())
+            if " " in norm_no:
+                if norm_no in norm_phrase:
+                    return "NO"
+            else:
+                if norm_no in words:
+                    return "NO"
+
+        # 3. Check YES
+        for yes_word in cls.YES_MARKERS:
+            norm_yes = " ".join(re.sub(r'[^\w\s]', ' ', yes_word).split())
+            if " " in norm_yes:
+                if norm_yes in norm_phrase:
+                    return "YES"
+            else:
+                if norm_yes in words:
+                    return "YES"
+
+        return "AMBIGUOUS"
 
 
 class LanguageDetector:
