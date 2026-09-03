@@ -42,6 +42,28 @@ class SpeechToSpeechEngine:
     Coordinates isolated worker loops for VAD, STT, Conversation/LLM, and TTS.
     """
 
+    _cached_fast_audio: dict[str, bytes] = {}
+    _cache_warmed: bool = False
+
+    @classmethod
+    async def warmup_fast_query_cache(cls, tts_provider):
+        """Pre-cache standard FastQueryRouter Indic & English responses in-memory as raw PCM16 bytes for 0ms TTS latency."""
+        from app.conversation.router import FastQueryRouter
+        logger.info("[FAST_CACHE] Starting in-memory TTS pre-caching for FastQueryRouter responses...")
+        count = 0
+        for lang, text in FastQueryRouter.get_all_standard_responses():
+            cache_key = f"{lang}:{text.strip()}"
+            if cache_key in cls._cached_fast_audio:
+                continue
+            try:
+                pcm = await tts_provider.synthesize_text(text, language_code=lang, speaker="priya")
+                if pcm and len(pcm) > 0:
+                    cls._cached_fast_audio[cache_key] = pcm
+                    count += 1
+            except Exception as e:
+                logger.warning(f"[FAST_CACHE] Failed to pre-cache ({lang}) '{text[:30]}...': {e}")
+        logger.info(f"[FAST_CACHE] Pre-cached {count} FastQueryRouter audio responses in memory (total cached: {len(cls._cached_fast_audio)})")
+
     def __init__(
         self,
         session: SessionState,
@@ -135,6 +157,11 @@ class SpeechToSpeechEngine:
             return
         self._running = True
         logger.info(f"Starting S2S Engine for session {self.session.session_id}", extra={"session_id": self.session.session_id})
+
+        # Warm up FastRouter in-memory TTS cache in the background
+        if not SpeechToSpeechEngine._cache_warmed:
+            SpeechToSpeechEngine._cache_warmed = True
+            asyncio.create_task(SpeechToSpeechEngine.warmup_fast_query_cache(self.tts_provider))
 
         self._tasks = [
             asyncio.create_task(self._vad_worker(), name="vad_worker"),
@@ -484,8 +511,8 @@ class SpeechToSpeechEngine:
                 current_speech_audio.clear()
                 
                 voiced_ms = getattr(self.turn_manager, "last_finalized_speech_ms", 0.0)
-                # Filter out short line noise bursts, breaths, taps, and transient audio fragments under 100ms of actual voiced speech
-                if (voiced_ms > 0 and voiced_ms < 100.0) or len(speech_bytes) < 1600:
+                # Filter out line noise bursts and transient fragments under 20ms of actual voiced speech
+                if (voiced_ms > 0 and voiced_ms < 20.0) or len(speech_bytes) < 640:
                     logger.info(f"Ignoring transient noise / sub-threshold sound (voiced={voiced_ms:.0f}ms, bytes={len(speech_bytes)}) — skipping STT/LLM")
                     self.session.current_turn.state = TurnStateEnum.LISTENING
                     self.session.user_has_floor = True
@@ -869,7 +896,11 @@ class SpeechToSpeechEngine:
             self.session.last_response_text = fast_resp
             self.session.append_message(role="assistant", content=fast_resp)
 
-            # ── FAST ROUTER HIT: 0ms LLM — STT + TTS only ──────────────────────
+            # ── FAST ROUTER HIT: Check In-Memory Pre-Cached Audio ─────────────────
+            active_lang = self.session.preferred_language or self.session.language or "en-IN"
+            cache_key = f"{active_lang}:{fast_resp.strip()}"
+            cached_pcm = SpeechToSpeechEngine._cached_fast_audio.get(cache_key)
+
             now_fast = time.time() * 1000
             stt_latency = (
                 (self._current_metrics.stt_end_time_ms or now_fast) - (self._current_metrics.stt_start_time_ms or now_fast)
@@ -880,7 +911,8 @@ class SpeechToSpeechEngine:
                 f"response='{fast_resp[:80]}{'...' if len(fast_resp) > 80 else ''}' "
                 f"complexity={complexity} stt_ms={stt_latency:.0f} "
                 f"llm_ms=0 (bypassed) "
-                f"expected_total_ms=~{stt_latency + 500:.0f}ms (STT+TTS1)",
+                f"cached_audio={'YES (0ms TTS)' if cached_pcm else 'NO (stream_synthesize)'} "
+                f"expected_total_ms=~{stt_latency + (0 if cached_pcm else 500):.0f}ms",
                 extra={"session_id": self.session.session_id, "turn_id": turn_id}
             )
 
@@ -913,7 +945,14 @@ class SpeechToSpeechEngine:
                 self._current_metrics.llm_first_token_time_ms = now_ts
                 self._current_metrics.llm_end_time_ms = now_ts
 
-            await self.queues.tts_in_queue.put({"delta": fast_resp, "turn_id": turn_id, "generation_id": gen_id, "token": token})
+            tts_packet = {
+                "delta": fast_resp,
+                "turn_id": turn_id,
+                "generation_id": gen_id,
+                "token": token,
+                "cached_pcm": cached_pcm
+            }
+            await self.queues.tts_in_queue.put(tts_packet)
             await self.queues.tts_in_queue.put({"delta": "__EOF__", "turn_id": turn_id, "generation_id": gen_id, "token": token})
             return
 
@@ -1051,6 +1090,106 @@ class SpeechToSpeechEngine:
             logger.info(f"[TURN {item_turn_id}] tts_started={now_ms:.3f} gen={item_gen_id} lang={playback_lang}")
             if self._current_metrics and self._current_metrics.turn_id == item_turn_id:
                 self._current_metrics.tts_start_time_ms = now_ms
+
+            # ── 0.0ms INSTANT DISPATCH FOR PRE-CACHED AUDIO ───────────────────────
+            cached_pcm = item.get("cached_pcm") if isinstance(item, dict) else None
+            if cached_pcm:
+                logger.info(f"[TTS_CACHE_DISPATCH] 0.0ms instant dispatch of pre-cached audio ({len(cached_pcm)} bytes) gen={item_gen_id}")
+                chunker = AudioChunker(sample_rate=16000, frame_duration_ms=20)
+                first_audio = True
+                for frame in chunker.feed(cached_pcm):
+                    if (
+                        (token and token.is_cancelled)
+                        or self.session.is_generation_cancelled(item_gen_id)
+                        or item_gen_id != self.session.active_playback_generation_id
+                    ):
+                        logger.info(f"[TTS] Generation cancelled during cached audio dispatch gen={item_gen_id}")
+                        break
+
+                    if first_audio:
+                        first_audio = False
+                        now_ms = time.time() * 1000
+                        if self._current_metrics and self._current_metrics.turn_id == item_turn_id:
+                            self._current_metrics.tts_first_audio_time_ms = now_ms
+                            m = self._current_metrics
+                            sp_end = m.speech_end_time_ms or 0
+                            tot_ms = now_ms - sp_end if sp_end > 0 else (now_ms - m.tts_start_time_ms if m.tts_start_time_ms else 0)
+                            logger.info(
+                                f"[VOICE_LATENCY] turn_id={item_turn_id} "
+                                f"speech_to_first_audio={tot_ms:.0f}ms "
+                                f"stt={m.stt_latency_ms:.0f}ms "
+                                f"llm_ttft=0ms "
+                                f"tts_first_audio=0ms (PRE-CACHED RAM)"
+                            )
+
+                    if turn:
+                        turn.tts_audio_chunks_count += 1
+                    self.session.extend_playback_deadline(20.0)
+                    self._outbound_ref_buffer.append(frame.to_numpy_float32())
+                    try:
+                        self.queues.audio_out_queue.put_nowait(frame)
+                    except asyncio.QueueFull:
+                        pass
+
+                    if (
+                        not (token and token.is_cancelled)
+                        and not self.session.is_generation_cancelled(item_gen_id)
+                        and not self.session.user_has_floor
+                        and item_gen_id == self.session.active_playback_generation_id
+                    ):
+                        b64_audio = AudioCodec.frame_to_base64(frame)
+                        self._emit_event(SessionEvent(
+                            event=EventType.AUDIO_OUTPUT,
+                            session_id=self.session.session_id,
+                            turn_id=item_turn_id,
+                            generation_id=item_gen_id,
+                            data={
+                                "data": b64_audio,
+                                "seq": frame.seq,
+                                "sample_rate": frame.sample_rate,
+                                "duration_ms": frame.duration_ms,
+                                "language": playback_lang,
+                                "cancellation_cycle": getattr(self.session, "cancellation_cycle_id", 0)
+                            }
+                        ))
+
+                final_frame = chunker.flush()
+                if final_frame and not (token and token.is_cancelled) and not self.session.is_generation_cancelled(item_gen_id):
+                    self.session.extend_playback_deadline(20.0)
+                    self._outbound_ref_buffer.append(final_frame.to_numpy_float32())
+                    try:
+                        self.queues.audio_out_queue.put_nowait(final_frame)
+                    except asyncio.QueueFull:
+                        pass
+                    b64_audio = AudioCodec.frame_to_base64(final_frame)
+                    self._emit_event(SessionEvent(
+                        event=EventType.AUDIO_OUTPUT,
+                        session_id=self.session.session_id,
+                        turn_id=item_turn_id,
+                        generation_id=item_gen_id,
+                        data={
+                            "data": b64_audio,
+                            "seq": final_frame.seq,
+                            "sample_rate": final_frame.sample_rate,
+                            "duration_ms": final_frame.duration_ms,
+                            "language": playback_lang,
+                            "cancellation_cycle": getattr(self.session, "cancellation_cycle_id", 0)
+                        }
+                    ))
+
+                # Drain the __EOF__ sentinel from tts_in_queue for this generation
+                try:
+                    await asyncio.wait_for(self.queues.tts_in_queue.get(), timeout=0.05)
+                except Exception:
+                    pass
+
+                self._emit_event(SessionEvent(
+                    event=EventType.RESPONSE_END,
+                    session_id=self.session.session_id,
+                    turn_id=item_turn_id,
+                    generation_id=item_gen_id
+                ))
+                continue
 
             # Create an async generator for text arriving in this response cycle
             async def text_streamer():

@@ -186,17 +186,6 @@ class FastQueryRouter:
             primary_item: KnowledgeItem = res.items[0]
             fast_response = cls._format_fast_answer(normalized, primary_item, active_lang)
 
-            # Anti-repetition check: If the immediate previous assistant message was already this exact fast response,
-            # do not reuse it. Delegate to LLM for fresh contextual answer!
-            if fast_response and session.messages:
-                last_asst_msgs = [m["content"] for m in session.messages if m.get("role") == "assistant"]
-                if last_asst_msgs and last_asst_msgs[-1].strip() == fast_response.strip():
-                    logger.info(
-                        f"[FAST_ROUTER] Fast response matches immediate previous response; delegating to LLM for fresh contextual answer",
-                        extra={"session_id": session.session_id}
-                    )
-                    return QueryComplexity.COMPLEX, None
-
             if fast_response:
                 logger.info(
                     f"[FAST_ROUTER] Fast verified response generated for intent={normalized.intent.value} "
@@ -271,3 +260,66 @@ class FastQueryRouter:
             return "Yes, separate AC and Non-AC hostels are available for boys and girls. Annual hostel fee is INR 80,000 including food."
 
         return None
+
+    @classmethod
+    def get_all_standard_responses(cls) -> List[Tuple[str, str]]:
+        """Return all standard verified response texts across te-IN, hi-IN, and en-IN for offline/startup TTS pre-caching."""
+        responses: List[Tuple[str, str]] = []
+        
+        # 1. Fees: CSE, ECE, General
+        fees_texts = [
+            ("te-IN", "Apex University లో BTech CSE annual fee 1,50,000 rupees ఉంటుంది. ఇంకా ఏమైనా వివరాలు కావాలా?"),
+            ("hi-IN", "Apex University में BTech CSE की वार्षिक फीस 1,50,000 रुपये है। क्या आपको और जानकारी चाहिए?"),
+            ("en-IN", "Apex University offers BTech CSE with an annual fee of INR 1,50,000. Would you like details on admissions?"),
+            ("te-IN", "Apex University లో BTech ECE annual fee 1,20,000 rupees ఉంటుంది. ఇంకేమైనా వివరాలు కావాలా?"),
+            ("hi-IN", "Apex University में BTech ECE की वार्षिक फीस 1,20,000 रुपये है। क्या आपको और जानकारी चाहिए?"),
+            ("en-IN", "Apex University offers BTech ECE with an annual fee of INR 1,20,000. How can I help you further?"),
+            ("te-IN", "Apex University లో BTech CSE fee 1,50,000 rupees మరియు ECE fee 1,20,000 rupees per year."),
+            ("hi-IN", "Apex University में BTech CSE की फीस 1,50,000 रुपये और ECE की फीस 1,20,000 रुपये प्रति वर्ष है।"),
+            ("en-IN", "At Apex University, BTech CSE annual fee is INR 1,50,000 and ECE is INR 1,20,000 per year."),
+        ]
+        responses.extend(fees_texts)
+
+        # 2. Courses available
+        courses_texts = [
+            ("te-IN", "మా Apex University లో BTech Computer Science (CSE) మరియు Electronics (ECE) courses అందుబాటులో ఉన్నాయి."),
+            ("hi-IN", "Apex University में BTech Computer Science (CSE) और Electronics (ECE) कोर्सेस उपलब्ध हैं।"),
+            ("en-IN", "Apex University currently offers BTech Computer Science (CSE) and Electronics and Communication (ECE)."),
+        ]
+        responses.extend(courses_texts)
+
+        # 3. Eligibility
+        eligibility_texts = [
+            ("te-IN", "BTech admission కోసం 12th Standard PCM లో 60% మార్కులు మరియు valid entrance rank ఉండాలి."),
+            ("hi-IN", "BTech में प्रवेश के लिए 12वीं PCM में 60% अंक और वैध प्रवेश परीक्षा रैंक आवश्यक है।"),
+            ("en-IN", "Eligibility for BTech CSE requires 60% aggregate in 12th Standard PCM and a valid entrance rank."),
+        ]
+        responses.extend(eligibility_texts)
+
+        # 4. Admission dates
+        dates_texts = [
+            ("te-IN", "2026-27 session admissions మే 15, 2026 న మొదలై జూలై 31, 2026 వరకు ఉంటాయి."),
+            ("hi-IN", "2026-27 सत्र के लिए प्रवेश 15 मई 2026 से शुरू होकर 31 जुलाई 2026 तक चलेंगे।"),
+            ("en-IN", "BTech admissions for the 2026-27 session open on May 15, 2026 and close on July 31, 2026."),
+        ]
+        responses.extend(dates_texts)
+
+        # 5. Hostels
+        hostel_texts = [
+            ("te-IN", "అవునండి, boys and girls కి separate AC and Non-AC hostels ఉన్నాయి. ఫుడ్ తో కలిపి annual fee 80,000 rupees."),
+            ("hi-IN", "जी हाँ, छात्र और छात्राओं के लिए अलग AC और Non-AC हॉस्टल उपलब्ध हैं। भोजन सहित वार्षिक शुल्क 80,000 रुपये है।"),
+            ("en-IN", "Yes, separate AC and Non-AC hostels are available for boys and girls. Annual hostel fee is INR 80,000 including food."),
+        ]
+        responses.extend(hostel_texts)
+
+        # 6. Common unoffered programs (MBA, Mechanical, Civil)
+        for prog in ["MBA", "Mechanical Engineering", "Civil Engineering"]:
+            responses.append(("te-IN", f"మా దగ్గర ప్రస్తుతం {prog} కోర్స్ లేదు, కేవలం B.Tech CSE మరియు ECE మాత్రమే ఉన్నాయి. మీరు కౌన్సెలర్ తో మాట్లాడాలనుకుంటున్నారా?"))
+            responses.append(("hi-IN", f"हमारे पास अभी {prog} कोर्स नहीं है, हम केवल B.Tech CSE और ECE प्रदान करते हैं। क्या आप काउंसलर से बात करना चाहेंगे?"))
+            responses.append(("en-IN", f"We do not offer {prog} right now; we currently offer B.Tech in CSE and ECE. Would you like me to connect you with a human counselor?"))
+
+        # 7. Goodbyes
+        for lang, bye in cls.GOODBYE_RESPONSES.items():
+            responses.append((lang, bye))
+
+        return responses

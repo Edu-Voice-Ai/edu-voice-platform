@@ -16,10 +16,19 @@ logger = get_logger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown hooks."""
+    import asyncio
     logger.info("Initializing Edu-Voice-AI Realtime Voice Engine...")
     logger.info(
         f"[CONFIG] STT model: {settings.stt_model} | LLM model: {settings.llm_model} | TTS model: {settings.tts_model} | Supported languages: {', '.join(settings.supported_languages)}"
     )
+    # Background warm-up of FastRouter in-memory TTS cache for 0ms TTS latency
+    try:
+        from app.tts.sarvam import SarvamTTSProvider
+        from app.pipeline.engine import SpeechToSpeechEngine
+        tts = SarvamTTSProvider(api_key=settings.sarvam_api_key, model=settings.tts_model, default_speaker=settings.tts_speaker)
+        asyncio.create_task(SpeechToSpeechEngine.warmup_fast_query_cache(tts))
+    except Exception as e:
+        logger.warning(f"Failed to trigger FastRouter TTS pre-caching: {e}")
     yield
     logger.info("Shutting down Edu-Voice-AI Realtime Voice Engine...")
 

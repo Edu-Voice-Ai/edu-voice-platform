@@ -72,8 +72,8 @@ async def test_telugu_followup_gate_query():
 
 
 @pytest.mark.asyncio
-async def test_anti_repetition_guard_in_fast_router():
-    """Verify Fast Router will not repeat the same response twice in a row."""
+async def test_repeat_queries_return_fast_path_without_llm_penalty():
+    """Verify Fast Router returns verified response immediately even on repeated queries (no LLM penalty)."""
     session = SessionState(session_id="test_sess_003", organization_id="org_apex_univ", agent_id="agent_admission")
     session.preferred_language = "en-IN"
     session.language_selection_complete = True
@@ -86,9 +86,8 @@ async def test_anti_repetition_guard_in_fast_router():
     session.append_message(role="user", content=t1_text)
     session.append_message(role="assistant", content=resp1)
 
-    # User repeats the query or similar phrase
+    # User repeats the query: must return authoritative answer again immediately without LLM penalty
     t2_text = "What is the fee for BTech CSE?"
     c2, resp2 = await FastQueryRouter.route_and_resolve_fast_path(session, t2_text, rag)
-    # Anti-repetition guard prevents repeating identical response back-to-back
-    assert c2 == QueryComplexity.COMPLEX
-    assert resp2 is None
+    assert c2 == QueryComplexity.SIMPLE
+    assert resp2 == resp1
