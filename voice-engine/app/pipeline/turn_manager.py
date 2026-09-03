@@ -26,7 +26,7 @@ class TurnManager:
         language_selection_silence_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
-        min_barge_in_duration_ms: int = 220,
+        min_barge_in_duration_ms: int = 120,
         barge_in_min_confidence: float = 0.40,
         barge_in_min_rms: float = 0.008,
         vocal_energy_ratio_threshold: float = 0.35,
@@ -201,15 +201,25 @@ class TurnManager:
                 self.barge_in_pre_buffer.clear()
                 return None
 
-            # Calibrated Telephony Barge-in Qualification Rule:
-            # A frame during playback is speech if:
-            # is_speech is True and conf >= 0.40 and (vocal_band_rms >= 0.008 or rms >= 0.010) and (vocal_energy_ratio >= 0.35 or conf >= 0.85)
-            is_qualifying = (
+            # Calibrated Telephony Barge-in Qualification Rule.
+            # HIGH-CONFIDENCE BYPASS (fast path): If Silero VAD is highly certain AND
+            # there is real vocal energy, immediately qualify the frame without any
+            # further gating (speaker_sim, spectral_flux, vocal_ratio checks).  This
+            # ensures "Wait", "Stop", "ఆగండి" interrupt without friction.
+            high_conf_bypass = (
                 is_speech
-                and vad_confidence >= self.barge_in_min_confidence
-                and (vocal_rms >= self.barge_in_min_rms or broadband_rms >= 0.010)
-                and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
+                and vad_confidence >= 0.70
+                and (vocal_rms >= 0.012 or broadband_rms >= 0.015)
             )
+            if high_conf_bypass:
+                is_qualifying = True
+            else:
+                is_qualifying = (
+                    is_speech
+                    and vad_confidence >= self.barge_in_min_confidence
+                    and (vocal_rms >= self.barge_in_min_rms or broadband_rms >= 0.010)
+                    and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
+                )
 
             # ── Adaptive Speaker Identity Gate ───────────────────────────────────
             # If the caller has been enrolled, additionally require speaker_sim >= 0.55
@@ -246,15 +256,19 @@ class TurnManager:
             # "హ్మ్") while the bot is speaking, do NOT count it toward the barge-in
             # accumulator.  Real interruptions ("ఆగండి", "Wait", "Stop") have high spectral
             # flux (> 0.15) and won't be flagged as backchannels.
-            if is_qualifying and getattr(acoustic_features, "is_backchannel_hum", False):
-                logger.info(
-                    f"[BACKCHANNEL_DETECTED] Passive listening hum suppressed during bot playback "
-                    f"flux={getattr(acoustic_features, 'spectral_flux', 0.0):.3f} "
-                    f"pitch_p={getattr(acoustic_features, 'pitch_periodicity', 0.0):.3f} "
-                    f"zcr={getattr(acoustic_features, 'zcr', 0.0):.3f} "
-                    f"rms={getattr(acoustic_features, 'rms', 0.0):.4f}"
-                )
-                is_qualifying = False
+            # TIGHTENED CRITERIA: Only suppress if vocal_rms < 0.025 — real words
+            # with energy >= 0.025 are NEVER suppressed regardless of flux.
+            if is_qualifying and not high_conf_bypass and getattr(acoustic_features, "is_backchannel_hum", False):
+                _voc_rms_check = vocal_rms if vocal_rms > 0 else broadband_rms
+                if _voc_rms_check < 0.025:  # Only suppress genuinely quiet hums
+                    logger.info(
+                        f"[BACKCHANNEL_DETECTED] Passive listening hum suppressed during bot playback "
+                        f"flux={getattr(acoustic_features, 'spectral_flux', 0.0):.3f} "
+                        f"pitch_p={getattr(acoustic_features, 'pitch_periodicity', 0.0):.3f} "
+                        f"zcr={getattr(acoustic_features, 'zcr', 0.0):.3f} "
+                        f"rms={getattr(acoustic_features, 'rms', 0.0):.4f}"
+                    )
+                    is_qualifying = False
 
             # ── Leaky Bucket accumulator ──────────────────────────────────────────
             # Telephony speech is NOT 100% consecutive: consonant closures (plosives like

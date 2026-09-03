@@ -55,7 +55,7 @@ class SpeechToSpeechEngine:
         min_silence_duration_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 40,
-        min_barge_in_duration_ms: int = 220,
+        min_barge_in_duration_ms: int = 120,
         barge_in_min_confidence: float = 0.40,
         barge_in_min_rms: float = 0.008,
         vocal_energy_ratio_threshold: float = 0.35,
@@ -868,6 +868,21 @@ class SpeechToSpeechEngine:
                 turn.generated_text = fast_resp
             self.session.last_response_text = fast_resp
             self.session.append_message(role="assistant", content=fast_resp)
+
+            # ── FAST ROUTER HIT: 0ms LLM — STT + TTS only ──────────────────────
+            now_fast = time.time() * 1000
+            stt_latency = (
+                (self._current_metrics.stt_end_time_ms or now_fast) - (self._current_metrics.stt_start_time_ms or now_fast)
+                if self._current_metrics and self._current_metrics.turn_id == turn_id else 0.0
+            )
+            logger.info(
+                f"[FAST_ROUTER_HIT] query='{query_for_resolution}' "
+                f"response='{fast_resp[:80]}{'...' if len(fast_resp) > 80 else ''}' "
+                f"complexity={complexity} stt_ms={stt_latency:.0f} "
+                f"llm_ms=0 (bypassed) "
+                f"expected_total_ms=~{stt_latency + 500:.0f}ms (STT+TTS1)",
+                extra={"session_id": self.session.session_id, "turn_id": turn_id}
+            )
 
             logger.info(
                 f"[RESPONSE_OWNERSHIP_TRACE]\n"

@@ -404,14 +404,16 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
 
                     # Drift limiter: If server falls behind, re-anchor pacing_start_wall_time
                     # so we don't burst multiple frames to 'catch up' into Exotel's hardware buffer.
-                    if now_t > expected_playback_time + 0.040:
+                    if now_t > expected_playback_time + 0.060:
                         pacing_start_wall_time = now_t - (pacing_frame_count * 0.020)
                         expected_playback_time = pacing_start_wall_time + (pacing_frame_count * 0.020)
 
-                    # Clamp limit: chunk transmission must not be > 40ms ahead of real playback
+                    # Clamp limit: chunk transmission must not be > 60ms ahead of real playback
+                    # (was 40ms — increased to 60ms to absorb cross-chunk TTS latency variance
+                    # and prevent mid-sentence stutter when chunk N+1 arrives slightly late).
                     lead_time = expected_playback_time - now_t
-                    if lead_time > 0.040:
-                        sleep_dur = lead_time - 0.040
+                    if lead_time > 0.060:
+                        sleep_dur = lead_time - 0.060
                         stop_ev = session.playback_interrupt_event() if session and hasattr(session, "playback_interrupt_event") else None
                         interrupted = False
                         if stop_ev is not None:

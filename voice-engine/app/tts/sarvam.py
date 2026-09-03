@@ -15,6 +15,12 @@ from app.core.logging import get_logger
 
 logger = get_logger("tts.sarvam")
 
+# ── Voice Consistency Lock ─────────────────────────────────────────────────
+# "priya" is the authoritative warm female counselor voice in Bulbul:v3
+# supported across en-IN, te-IN, hi-IN.  This constant OVERRIDES any caller-
+# supplied speaker kwarg to prevent accidental voice switching between turns.
+LOCKED_SPEAKER: str = "priya"
+
 
 class SarvamTTSProvider(TTSProvider):
     """Sarvam Bulbul REST & Streaming Text-to-Speech Provider with Overlapped Pipeline Prefetch."""
@@ -95,10 +101,12 @@ class SarvamTTSProvider(TTSProvider):
             "api-subscription-key": self.api_key,
             "Content-Type": "application/json"
         }
+        # Always enforce locked speaker — ignore any caller-supplied override
+        _speaker = LOCKED_SPEAKER
         payload = {
             "inputs": [clean_text],
             "target_language_code": language_code,
-            "speaker": speaker or self.default_speaker,
+            "speaker": _speaker,
             "model": self.model,
             "enable_preprocessing": True
         }
@@ -145,7 +153,8 @@ class SarvamTTSProvider(TTSProvider):
         """
         chunker = AudioChunker(sample_rate=16000, frame_duration_ms=20)
         delimiters = {".", "!", "?", "।", "\n"}
-        active_speaker = speaker or self.default_speaker
+        # Always enforce locked speaker — caller-supplied speaker arg is ignored
+        active_speaker = LOCKED_SPEAKER
 
         # Bounded async queue for pending text chunks to synthesize
         segment_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=10)
