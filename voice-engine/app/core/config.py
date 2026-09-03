@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     short_utterance_silence_ms: int = Field(default=350, alias="SHORT_UTTERANCE_SILENCE_MS")
     language_selection_silence_ms: int = Field(default=350, alias="LANGUAGE_SELECTION_SILENCE_MS")
     structured_input_silence_ms: int = Field(default=1200, alias="STRUCTURED_INPUT_SILENCE_MS")
-    barge_in_confirmation_ms: int = Field(default=120, alias="BARGE_IN_CONFIRMATION_MS")
+    barge_in_confirmation_ms: int = Field(default=200, alias="BARGE_IN_CONFIRMATION_MS")
     barge_in_min_confidence: float = Field(default=0.40, alias="BARGE_IN_MIN_CONFIDENCE")
     barge_in_min_rms: float = Field(default=0.008, alias="BARGE_IN_MIN_RMS")
     vocal_energy_ratio_threshold: float = Field(default=0.35, alias="VOCAL_ENERGY_RATIO_THRESHOLD")

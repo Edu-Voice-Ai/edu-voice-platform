@@ -108,7 +108,8 @@ class FastQueryRouter:
             return QueryComplexity.GOODBYE
 
         clean = text.lower().strip()
-        if any(k in clean for k in cls.COMPLEX_MARKERS) or any(f in clean for f in cls.FOLLOW_UP_MARKERS):
+        # Explicit comparison or reasoning markers always require the LLM
+        if any(k in clean for k in cls.COMPLEX_MARKERS):
             return QueryComplexity.COMPLEX
 
         # Simple factual intents with clear knowledge coverage
@@ -119,10 +120,13 @@ class FastQueryRouter:
             SemanticIntent.ADMISSION_DATES_INQUIRY,
             SemanticIntent.HOSTEL_INQUIRY,
         ):
-            # If the utterance has more than 10 words or complex conversational structure, let LLM handle it
-            if len(clean.split()) > 10:
+            # If the utterance has more than 15 words, let LLM handle the nuance
+            if len(clean.split()) > 15:
                 return QueryComplexity.COMPLEX
             return QueryComplexity.SIMPLE
+
+        if any(f in clean for f in cls.FOLLOW_UP_MARKERS):
+            return QueryComplexity.COMPLEX
 
         return QueryComplexity.COMPLEX
 

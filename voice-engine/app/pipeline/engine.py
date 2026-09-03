@@ -77,7 +77,7 @@ class SpeechToSpeechEngine:
         min_silence_duration_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 40,
-        min_barge_in_duration_ms: int = 120,
+        min_barge_in_duration_ms: int = 200,
         barge_in_min_confidence: float = 0.40,
         barge_in_min_rms: float = 0.008,
         vocal_energy_ratio_threshold: float = 0.35,
@@ -606,7 +606,7 @@ class SpeechToSpeechEngine:
                 "uh-huh", "uh huh", "uhhuh", "uh", "uhh",
                 "ok", "okay", "ah", "ahh",
                 # Telugu backchannel tokens (Sarvam STT representations)
-                "హ్మ్", "హ్మ", "మ్", "మ", "హా", "ఆ", "అవును",
+                "హ్మ్", "హ్మ", "మ్", "మ", "హా", "ఆ", "అవును", "ఊ", "ఊహూ", "ఉ", "ఉఁ",
                 # Hindi backchannel tokens
                 "हम्म", "हाँ", "हम",
             }

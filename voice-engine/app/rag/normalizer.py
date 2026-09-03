@@ -67,7 +67,7 @@ class SemanticQueryNormalizer:
 
     # Specific Course Identifiers
     CSE_IDENTIFIERS = {"cse", "csc", "computer", "computers", "software", "సిఎస్ఇ", "సిఎస్సి", "సిఎస్సీ", "కంప్యూటర్", "सीएसई", "कंप्यूटर"}
-    ECE_IDENTIFIERS = {"ece", "electronics", "communication", "ఈసిఈ", "ఎలక్ట్రానిక్స్", "ईसीई", "इलेक्ट्रॉनिक्स"}
+    ECE_IDENTIFIERS = {"ece", "electronics", "communication", "ఈసిఈ", "ఈసీఈ", "ఎలక్ట్రానిక్స్", "ईसीई", "इलेक्ट्रॉनिक्स"}
     MECH_IDENTIFIERS = {"mech", "mechanical", "మెకానికల్", "मैकेनिकल"}
 
     @classmethod
@@ -80,7 +80,7 @@ class SemanticQueryNormalizer:
         courses_mentioned = []
         if words & cls.CSE_IDENTIFIERS or any(k in text_lower for k in ["cse", "csc", "computer science", "కంప్యూటర్", "సిఎస్ఇ", "సిఎస్సి"]):
             courses_mentioned.append("CSE")
-        if words & cls.ECE_IDENTIFIERS or any(k in text_lower for k in ["ece", "electronics", "ఎలక్ట్రానిక్స్", "ఈసిఈ"]):
+        if words & cls.ECE_IDENTIFIERS or any(k in text_lower for k in ["ece", "electronics", "ఎలక్ట్రానిక్స్", "ఈసిఈ", "ఈసీఈ"]):
             courses_mentioned.append("ECE")
         if words & cls.MECH_IDENTIFIERS or any(k in text_lower for k in ["mech", "mechanical", "మెకానికల్"]):
             courses_mentioned.append("MECH")

@@ -30,7 +30,7 @@ class AcousticFeatures:
     vocal_band_rms: float = 0.0
     vocal_energy_ratio: float = 0.0
     # Backchannel / passive listening hum detection
-    spectral_flux: float = 0.0        # Rate of spectral change across consecutive 20ms frames (0.0=static hum, 1.0=dynamic speech)
+    spectral_flux: float = 0.5        # Rate of spectral change across consecutive 20ms frames (0.0=static hum, 0.5+=dynamic speech)
     is_backchannel_hum: bool = False  # True if frame is a monotone nasal hum ("hmmm", "uh-huh") — NOT a real interruption
 
 

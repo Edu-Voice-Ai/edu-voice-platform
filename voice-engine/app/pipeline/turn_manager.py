@@ -26,7 +26,7 @@ class TurnManager:
         language_selection_silence_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
-        min_barge_in_duration_ms: int = 120,
+        min_barge_in_duration_ms: int = 200,
         barge_in_min_confidence: float = 0.40,
         barge_in_min_rms: float = 0.008,
         vocal_energy_ratio_threshold: float = 0.35,
@@ -201,74 +201,62 @@ class TurnManager:
                 self.barge_in_pre_buffer.clear()
                 return None
 
-            # Calibrated Telephony Barge-in Qualification Rule.
-            # HIGH-CONFIDENCE BYPASS (fast path): If Silero VAD is highly certain AND
-            # there is real vocal energy, immediately qualify the frame without any
-            # further gating (speaker_sim, spectral_flux, vocal_ratio checks).  This
-            # ensures "Wait", "Stop", "ఆగండి" interrupt without friction.
-            high_conf_bypass = (
-                is_speech
-                and vad_confidence >= 0.70
-                and (vocal_rms >= 0.012 or broadband_rms >= 0.015)
-            )
-            if high_conf_bypass:
-                is_qualifying = True
+            # ── Backchannel / Passive-Listening Hum Suppressor (PRIORITY GATE) ──
+            # Human backchannel hums ("Hmm", "uh-huh", "mm", "ఊ", "హ్మ్") are passive
+            # acknowledgment sounds with static formant structures (spectral_flux < 0.08).
+            # Silero VAD flags them with high confidence (0.85+) because human vocal cords
+            # are vibrating, but they must NEVER bypass backchannel suppression.
+            # If a frame is a monotone hum OR has low spectral flux (< 0.08), it is strictly
+            # NON-QUALIFYING for barge-in, allowing the bucket to decay.
+            is_backchannel = False
+            if acoustic_features is not None:
+                flux_val = float(getattr(acoustic_features, "spectral_flux", 1.0) or 0.0)
+                is_hum = bool(getattr(acoustic_features, "is_backchannel_hum", False))
+                if is_hum or flux_val < 0.08:
+                    is_backchannel = True
+                    rms_val = float(getattr(acoustic_features, "rms", 0.0) or 0.0)
+                    logger.info(
+                        f"[BACKCHANNEL_SUPPRESSED] flux={flux_val:.3f} rms={rms_val:.4f}"
+                    )
+
+            if is_backchannel:
+                is_qualifying = False
             else:
+                # Telephony Barge-in Qualification Rule:
+                # Real interruption speech ("Wait", "Stop", "ఆగండి", "ఫీజు ఎంత") has dynamic
+                # formant transitions (spectral_flux >= 0.08) and sufficient vocal energy.
                 is_qualifying = (
                     is_speech
                     and vad_confidence >= self.barge_in_min_confidence
                     and (vocal_rms >= self.barge_in_min_rms or broadband_rms >= 0.010)
-                    and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
+                    and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.70)
                 )
 
-            # ── Adaptive Speaker Identity Gate ───────────────────────────────────
-            # If the caller has been enrolled, additionally require speaker_sim >= 0.55
-            # to prevent background voices (TV, 1m talker) from triggering barge-in.
-            # High-confidence VAD frames (conf >= 0.90) bypass the similarity gate to
-            # prevent genuine caller whispering or low-energy speech from being dropped.
-            if is_qualifying:
-                profiler = getattr(self.session, "speaker_profiler", None)
-                if profiler is not None and profiler.is_enrolled:
-                    try:
-                        frame_audio = np.frombuffer(frame_data, dtype=np.int16).astype(np.float32) / 32768.0 if frame_data else None
-                        speaker_sim = profiler.calculate_speaker_similarity(
-                            frame_audio=frame_audio,
-                            frame_rms=vocal_rms if vocal_rms > 0 else broadband_rms,
-                            frame_spectral_centroid=float(getattr(acoustic_features, "spectral_centroid", 0.0) or 0.0) if acoustic_features else None,
-                            vad_confidence=vad_confidence
-                        )
-                        if speaker_sim < 0.45 and vad_confidence < 0.90:
-                            logger.debug(
-                                f"[SPEAKER_LOCK] Barge-in frame rejected as background noise "
-                                f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
+                # ── Adaptive Speaker Identity Gate ───────────────────────────────
+                if is_qualifying:
+                    profiler = getattr(self.session, "speaker_profiler", None)
+                    if profiler is not None and profiler.is_enrolled:
+                        try:
+                            frame_audio = np.frombuffer(frame_data, dtype=np.int16).astype(np.float32) / 32768.0 if frame_data else None
+                            speaker_sim = profiler.calculate_speaker_similarity(
+                                frame_audio=frame_audio,
+                                frame_rms=vocal_rms if vocal_rms > 0 else broadband_rms,
+                                frame_spectral_centroid=float(getattr(acoustic_features, "spectral_centroid", 0.0) or 0.0) if acoustic_features else None,
+                                vad_confidence=vad_confidence
                             )
-                            is_qualifying = False
-                        elif speaker_sim < 0.55:
-                            logger.debug(
-                                f"[SPEAKER_LOCK] Uncertain barge-in frame accepted (conf bypass) "
-                                f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
-                            )
-                    except Exception:
-                        pass  # Degrade gracefully — don't block barge-in on profiler errors
-
-            # ── Backchannel / Passive-Listening Hum Suppressor ──────────────────────
-            # If the acoustic gate detects a monotone nasal hum ("hmmm", "mm", "uh-huh",
-            # "హ్మ్") while the bot is speaking, do NOT count it toward the barge-in
-            # accumulator.  Real interruptions ("ఆగండి", "Wait", "Stop") have high spectral
-            # flux (> 0.15) and won't be flagged as backchannels.
-            # TIGHTENED CRITERIA: Only suppress if vocal_rms < 0.025 — real words
-            # with energy >= 0.025 are NEVER suppressed regardless of flux.
-            if is_qualifying and not high_conf_bypass and getattr(acoustic_features, "is_backchannel_hum", False):
-                _voc_rms_check = vocal_rms if vocal_rms > 0 else broadband_rms
-                if _voc_rms_check < 0.025:  # Only suppress genuinely quiet hums
-                    logger.info(
-                        f"[BACKCHANNEL_DETECTED] Passive listening hum suppressed during bot playback "
-                        f"flux={getattr(acoustic_features, 'spectral_flux', 0.0):.3f} "
-                        f"pitch_p={getattr(acoustic_features, 'pitch_periodicity', 0.0):.3f} "
-                        f"zcr={getattr(acoustic_features, 'zcr', 0.0):.3f} "
-                        f"rms={getattr(acoustic_features, 'rms', 0.0):.4f}"
-                    )
-                    is_qualifying = False
+                            if speaker_sim < 0.45 and vad_confidence < 0.90:
+                                logger.debug(
+                                    f"[SPEAKER_LOCK] Barge-in frame rejected as background noise "
+                                    f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
+                                )
+                                is_qualifying = False
+                            elif speaker_sim < 0.55:
+                                logger.debug(
+                                    f"[SPEAKER_LOCK] Uncertain barge-in frame accepted (conf bypass) "
+                                    f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
+                                )
+                        except Exception:
+                            pass  # Degrade gracefully — don't block barge-in on profiler errors
 
             # ── Leaky Bucket accumulator ──────────────────────────────────────────
             # Telephony speech is NOT 100% consecutive: consonant closures (plosives like
