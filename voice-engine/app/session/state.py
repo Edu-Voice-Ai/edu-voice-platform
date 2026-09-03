@@ -6,6 +6,7 @@ import time
 from app.core.ids import generate_turn_id, generate_generation_id
 from app.pipeline.cancellation import CancellationToken
 from app.core.logging import get_logger
+from app.audio.speaker_lock import AdaptiveSpeakerVoiceProfiler
 
 logger = get_logger("session.state")
 
@@ -120,6 +121,9 @@ class SessionState:
     last_response_text: Optional[str] = None
     turn_count: int = 0
     playback_estimated_end_time_ms: float = 0.0
+
+    # Adaptive Speaker Voice Profiler — locks onto primary caller's vocal identity on Turn 1
+    speaker_profiler: AdaptiveSpeakerVoiceProfiler = field(default_factory=AdaptiveSpeakerVoiceProfiler)
 
     def extend_playback_deadline(self, duration_ms: float = 20.0):
         """Accumulate remaining physical playback time even when frames are queued faster than realtime."""

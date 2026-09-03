@@ -490,6 +490,23 @@ class SpeechToSpeechEngine:
                     self.session.current_turn.state = TurnStateEnum.LISTENING
                     self.session.user_has_floor = True
                     continue
+
+                # ── Adaptive Speaker Enrollment ─────────────────────────────────────
+                # Enroll the caller's vocal fingerprint from the first verified clean speech turn.
+                # This runs at Turn 1 (language selection) and any sufficiently long speech segment
+                # before the profiler has locked onto a profile.
+                if not self.session.speaker_profiler.is_enrolled:
+                    profile = self.session.speaker_profiler.try_enroll_from_accumulated()
+                    if profile is not None:
+                        logger.info(
+                            f"[SPEAKER_LOCK] Enrolled caller voice: "
+                            f"pitch={profile.pitch_f0_hz:.1f}Hz "
+                            f"centroid={profile.spectral_centroid_hz:.1f}Hz "
+                            f"crest={profile.near_mic_crest_factor:.2f} "
+                            f"rms={profile.baseline_rms:.4f}"
+                        )
+                    else:
+                        logger.debug("[SPEAKER_LOCK] Insufficient audio for enrollment — will retry on next turn")
                 
                 logger.info(
                     f"[TURN {turn.turn_id}]\n"
@@ -508,6 +525,13 @@ class SpeechToSpeechEngine:
                     current_speech_audio.extend(frame.data)
                     if self._stt_session:
                         await self._stt_session.push_audio(frame.data)
+                    # Feed enrollment chunks from Turn 1 into the speaker profiler
+                    if not self.session.speaker_profiler.is_enrolled and frame.data:
+                        try:
+                            pcm_f32 = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+                            self.session.speaker_profiler.add_enrollment_chunk(pcm_f32, chunk_ms=20.0)
+                        except Exception:
+                            pass
 
     async def _process_stt_turn(self, audio_bytes: bytes, turn_id: str, generation_id: str, token: CancellationToken):
         """Transcribe speech buffer and submit transcript to LLM queue."""

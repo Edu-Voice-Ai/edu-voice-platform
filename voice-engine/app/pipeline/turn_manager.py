@@ -211,6 +211,36 @@ class TurnManager:
                 and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
             )
 
+            # ── Adaptive Speaker Identity Gate ───────────────────────────────────
+            # If the caller has been enrolled, additionally require speaker_sim >= 0.55
+            # to prevent background voices (TV, 1m talker) from triggering barge-in.
+            # High-confidence VAD frames (conf >= 0.90) bypass the similarity gate to
+            # prevent genuine caller whispering or low-energy speech from being dropped.
+            if is_qualifying:
+                profiler = getattr(self.session, "speaker_profiler", None)
+                if profiler is not None and profiler.is_enrolled:
+                    try:
+                        frame_audio = np.frombuffer(frame_data, dtype=np.int16).astype(np.float32) / 32768.0 if frame_data else None
+                        speaker_sim = profiler.calculate_speaker_similarity(
+                            frame_audio=frame_audio,
+                            frame_rms=vocal_rms if vocal_rms > 0 else broadband_rms,
+                            frame_spectral_centroid=float(getattr(acoustic_features, "spectral_centroid", 0.0) or 0.0) if acoustic_features else None,
+                            vad_confidence=vad_confidence
+                        )
+                        if speaker_sim < 0.45 and vad_confidence < 0.90:
+                            logger.debug(
+                                f"[SPEAKER_LOCK] Barge-in frame rejected as background noise "
+                                f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
+                            )
+                            is_qualifying = False
+                        elif speaker_sim < 0.55:
+                            logger.debug(
+                                f"[SPEAKER_LOCK] Uncertain barge-in frame accepted (conf bypass) "
+                                f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
+                            )
+                    except Exception:
+                        pass  # Degrade gracefully — don't block barge-in on profiler errors
+
             # ── Leaky Bucket accumulator ──────────────────────────────────────────
             # Telephony speech is NOT 100% consecutive: consonant closures (plosives like
             # 'p','t','k') and cellular packet jitter produce isolated 20ms energy dips.
