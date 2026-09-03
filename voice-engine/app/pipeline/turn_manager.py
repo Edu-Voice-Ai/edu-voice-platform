@@ -26,7 +26,7 @@ class TurnManager:
         language_selection_silence_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
-        min_barge_in_duration_ms: int = 200,
+        min_barge_in_duration_ms: int = 140,
         barge_in_min_confidence: float = 0.40,
         barge_in_min_rms: float = 0.008,
         vocal_energy_ratio_threshold: float = 0.35,
@@ -201,34 +201,49 @@ class TurnManager:
                 self.barge_in_pre_buffer.clear()
                 return None
 
-            # ── Backchannel / Passive-Listening Hum Suppressor (PRIORITY GATE) ──
-            # Human backchannel hums ("Hmm", "uh-huh", "mm", "ఊ", "హ్మ్") are passive
-            # acknowledgment sounds with static formant structures (spectral_flux < 0.08).
-            # Silero VAD flags them with high confidence (0.85+) because human vocal cords
-            # are vibrating, but they must NEVER bypass backchannel suppression.
-            # If a frame is a monotone hum OR has low spectral flux (< 0.08), it is strictly
-            # NON-QUALIFYING for barge-in, allowing the bucket to decay.
-            is_backchannel = False
-            if acoustic_features is not None:
-                flux_val = float(getattr(acoustic_features, "spectral_flux", 1.0) or 0.0)
-                is_hum = bool(getattr(acoustic_features, "is_backchannel_hum", False))
-                if is_hum or flux_val < 0.08:
-                    is_backchannel = True
-                    rms_val = float(getattr(acoustic_features, "rms", 0.0) or 0.0)
-                    logger.info(
-                        f"[BACKCHANNEL_SUPPRESSED] flux={flux_val:.3f} rms={rms_val:.4f}"
-                    )
+            # ── High-Energy Spoken Word Fast-Qualification ───────────────────────
+            # If vocal energy is strong (vocal_rms >= 0.030 or rms >= 0.030) with confident VAD,
+            # it is an open-mouth intentional spoken word ("ఆగండి", "Wait", "Stop", "Hello").
+            # Frame is 100% QUALIFYING for barge-in.
+            high_energy_speech = (
+                is_speech
+                and vad_confidence >= 0.60
+                and (vocal_rms >= 0.030 or broadband_rms >= 0.030)
+            )
 
-            if is_backchannel:
+            # ── Quiet Backchannel Hum Suppressor ─────────────────────────────────
+            # A sound is ONLY a passive backchannel hum if:
+            #   spectral_flux < 0.08 AND vocal_band_rms < 0.025 AND rms < 0.025
+            # If vocal_band_rms >= 0.025 or rms >= 0.030, it is an open-mouth vocal utterance
+            # (like "Aa..." in "ఆగండి") and must NEVER be suppressed.
+            is_quiet_backchannel = (
+                bool(getattr(acoustic_features, "is_backchannel_hum", False))
+                or (
+                    float(getattr(acoustic_features, "spectral_flux", 1.0) or 0.0) < 0.08
+                    and vocal_rms < 0.025
+                    and broadband_rms < 0.025
+                    and float(getattr(acoustic_features, "pitch_periodicity", 0.0) or 0.0) >= 0.30
+                )
+            ) if acoustic_features is not None else False
+
+            if high_energy_speech:
+                is_qualifying = True
+            elif is_quiet_backchannel:
+                flux_val = float(getattr(acoustic_features, "spectral_flux", 0.0) or 0.0)
+                rms_val = float(getattr(acoustic_features, "rms", 0.0) or 0.0)
+                logger.info(
+                    f"[BACKCHANNEL_SUPPRESSED] flux={flux_val:.3f} rms={rms_val:.4f}"
+                )
                 is_qualifying = False
             else:
-                # Telephony Barge-in Qualification Rule:
-                # Real interruption speech ("Wait", "Stop", "ఆగండి", "ఫీజు ఎంత") has dynamic
-                # formant transitions (spectral_flux >= 0.08) and sufficient vocal energy.
+                # Moderate speech frame qualification:
+                # 1. Speech with decent confidence
+                # 2. Speech energy (vocal_rms >= 0.010 or rms >= 0.012)
+                # 3. Sufficient vocal ratio or confident VAD
                 is_qualifying = (
                     is_speech
                     and vad_confidence >= self.barge_in_min_confidence
-                    and (vocal_rms >= self.barge_in_min_rms or broadband_rms >= 0.010)
+                    and (vocal_rms >= 0.010 or broadband_rms >= 0.012)
                     and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.70)
                 )
 

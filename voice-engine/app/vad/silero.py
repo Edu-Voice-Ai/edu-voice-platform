@@ -25,6 +25,7 @@ class SileroVADProvider(VADProvider):
         self._last_conf = 0.0
         self._noise_floor = 0.002
         self._consecutive_speech_frames = 0
+        self._prev_frame_fft: Optional[np.ndarray] = None
 
         # Auto-discover ONNX model path
         search_paths = []
@@ -64,7 +65,11 @@ class SileroVADProvider(VADProvider):
             audio_float,
             noise_floor=self._noise_floor,
             outbound_ref=outbound_ref,
-            sample_rate=self.sample_rate
+            sample_rate=self.sample_rate,
+            prev_frame_fft=self._prev_frame_fft
+        )
+        _, self._prev_frame_fft = AcousticFeatureExtractor.compute_spectral_flux(
+            audio_float, self._prev_frame_fft, self.sample_rate
         )
 
         # Update dynamic background noise floor only during sustained low-energy quiet periods (not spikes)

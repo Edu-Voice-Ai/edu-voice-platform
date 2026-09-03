@@ -88,12 +88,12 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
     session.current_turn.state = TurnStateEnum.SPEAKING
     queues = PipelineQueueBundle()
 
-    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=200)
+    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=140)
 
     # Frame of 20ms silence bytes
     dummy_frame = b"\x00" * 640
 
-    # Simulate 10 frames of 'Hmm' hum: high VAD conf, but low spectral flux / is_backchannel_hum=True
+    # Simulate 10 frames of 'Hmm' hum: high VAD conf, but quiet and low spectral flux
     hum_features = AcousticFeatures(
         rms=0.015,
         snr_db=12.0,
@@ -120,9 +120,10 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
             vad_confidence=0.95,  # High VAD confidence!
             acoustic_features=hum_features
         )
-        assert transition is None, "Hmm with low flux must NOT trigger barge-in!"
+        assert transition is None, "Quiet Hmm must NOT trigger barge-in!"
 
-    # Now simulate real interruption ("ఆగండి" / "Wait"): high flux, high confidence
+    # Now simulate real interruption ("ఆగండి" / "Wait"):
+    # Opening vowel has high energy (vocal_rms=0.038, rms=0.040), must qualify even if initial flux is low
     speech_features = AcousticFeatures(
         rms=0.040,
         snr_db=18.0,
@@ -137,24 +138,24 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
         is_valid_speech=True,
         vocal_band_rms=0.038,
         vocal_energy_ratio=0.90,
-        spectral_flux=0.25,  # High flux (dynamic speech)
+        spectral_flux=0.05,  # Even on initial vowel with low flux, high energy must NOT be suppressed!
         is_backchannel_hum=False
     )
 
     triggered = False
-    for _ in range(12):
+    for _ in range(8):  # 7 frames = 140ms
         t = tm.handle_speech_frame(
             is_speech=True,
             frame_data=dummy_frame,
             frame_duration_ms=20,
-            vad_confidence=0.95,
+            vad_confidence=0.90,
             acoustic_features=speech_features
         )
         if t == "BARGE_IN":
             triggered = True
             break
 
-    assert triggered is True, "Dynamic real speech with flux=0.25 must trigger barge-in after 200ms!"
+    assert triggered is True, "High energy word 'ఆగండి' (rms=0.040) must trigger barge-in within 140ms!"
 
 
 def test_telugu_ece_fee_query_matches_fast_router():

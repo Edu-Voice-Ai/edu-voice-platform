@@ -225,15 +225,15 @@ class AcousticFeatureExtractor:
 
         # ── Spectral Flux & Backchannel Detection ────────────────────────────────
         spectral_flux, _ = cls.compute_spectral_flux(audio_float, prev_frame_fft, sample_rate)
-        # is_backchannel_hum: monotone nasal hum with static vocal tract.
-        #   Criteria:
-        #     1. Very low spectral flux (< 0.07) — near-static spectrum (no formant transitions).
-        #     2. Strong harmonic pitch periodicity (>= 0.35) — it IS voiced (humming), just static.
-        #     3. Low ZCR (< 0.18) — smooth nasal hum, not fricative speech.
-        #   "hmmm", "mm", "uh-huh" all satisfy these; consonant-onset words like "Wait" or "Stop"
-        #   produce high flux (> 0.15) and do NOT satisfy criteria 1.
+
+        # is_backchannel_hum: A sound is ONLY a passive backchannel hum if:
+        #   spectral_flux < 0.08 AND vocal_band_rms < 0.025 AND rms < 0.025
+        # If vocal_band_rms >= 0.025 or rms >= 0.030, it is an OPEN-MOUTH VOCAL UTTERANCE
+        # (like "Aa..." in "ఆగండి", "Wait", "Stop", or a question) and must NEVER be classified as a hum!
         is_backchannel_hum = bool(
-            spectral_flux < 0.07
+            spectral_flux < 0.08
+            and vocal_band_rms < 0.025
+            and rms < 0.025
             and pitch_periodicity >= 0.35
             and zcr < 0.18
             and rms >= 0.005  # Must have some energy — pure silence is not a backchannel
