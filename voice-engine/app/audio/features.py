@@ -1,5 +1,5 @@
 """Acoustic feature extraction and multi-dimensional voice discrimination."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import numpy as np
 
@@ -29,6 +29,9 @@ class AcousticFeatures:
     is_valid_speech: bool
     vocal_band_rms: float = 0.0
     vocal_energy_ratio: float = 0.0
+    # Backchannel / passive listening hum detection
+    spectral_flux: float = 0.0        # Rate of spectral change across consecutive 20ms frames (0.0=static hum, 1.0=dynamic speech)
+    is_backchannel_hum: bool = False  # True if frame is a monotone nasal hum ("hmmm", "uh-huh") — NOT a real interruption
 
 
 class AcousticFeatureExtractor:
@@ -164,14 +167,53 @@ class AcousticFeatureExtractor:
         except Exception:
             return 0.0
 
+    @staticmethod
+    def compute_spectral_flux(
+        audio_float: np.ndarray,
+        prev_frame_fft: Optional[np.ndarray],
+        sample_rate: int = 16000
+    ) -> Tuple[float, Optional[np.ndarray]]:
+        """
+        Compute spectral flux — the L2 norm of the magnitude spectrum difference between
+        the current frame and the previous frame, normalised to [0, 1].
+
+        Acoustic discrimination:
+          - Real spoken words ("Wait", "Stop", "Fee", "ఆగండి"): High flux (> 0.15) due to
+            rapid consonant-vowel formant transitions.
+          - Monotone nasal backchannels ("hmmm", "mm", "uh-huh", "హ్మ్"): Near-zero flux
+            (< 0.06) because the vocal tract shape is static throughout the hum.
+          - Silence / noise: flux ~ 0.0 (no spectral content change).
+
+        Returns:
+            (spectral_flux: float, current_frame_fft: np.ndarray) — the caller caches
+            current_frame_fft and passes it back as prev_frame_fft on the next call.
+        """
+        n = len(audio_float)
+        if n < 32:
+            return 0.0, None
+
+        windowed = audio_float * np.hanning(n)
+        current_fft = np.abs(np.fft.rfft(windowed)).astype(np.float32)
+
+        if prev_frame_fft is None or len(prev_frame_fft) != len(current_fft):
+            # First frame — no previous to compare against; return 0 flux
+            return 0.0, current_fft
+
+        # Normalized L2 spectral flux
+        diff = current_fft - prev_frame_fft
+        norm_factor = (np.sum(current_fft ** 2) + np.sum(prev_frame_fft ** 2)) * 0.5 + 1e-10
+        flux = float(np.sqrt(np.sum(diff ** 2)) / np.sqrt(norm_factor))
+        return min(flux, 1.0), current_fft
+
     @classmethod
     def analyze_frame(
         cls,
         audio_float: np.ndarray,
         noise_floor: float = 0.002,
         outbound_ref: Optional[np.ndarray] = None,
-        sample_rate: int = 16000
-    ) -> AcousticFeatures:
+        sample_rate: int = 16000,
+        prev_frame_fft: Optional[np.ndarray] = None,
+    ) -> "AcousticFeatures":
         """Perform comprehensive acoustic feature analysis on an audio frame."""
         rms = cls.compute_rms(audio_float)
         vocal_band_rms, vocal_energy_ratio, centroid = cls.compute_vocal_band_features(audio_float, sample_rate)
@@ -180,6 +222,22 @@ class AcousticFeatureExtractor:
         zcr = cls.compute_zcr(audio_float)
         pitch_periodicity = cls.compute_pitch_periodicity(audio_float, sample_rate)
         echo_corr = cls.compute_echo_correlation(audio_float, outbound_ref)
+
+        # ── Spectral Flux & Backchannel Detection ────────────────────────────────
+        spectral_flux, _ = cls.compute_spectral_flux(audio_float, prev_frame_fft, sample_rate)
+        # is_backchannel_hum: monotone nasal hum with static vocal tract.
+        #   Criteria:
+        #     1. Very low spectral flux (< 0.07) — near-static spectrum (no formant transitions).
+        #     2. Strong harmonic pitch periodicity (>= 0.35) — it IS voiced (humming), just static.
+        #     3. Low ZCR (< 0.18) — smooth nasal hum, not fricative speech.
+        #   "hmmm", "mm", "uh-huh" all satisfy these; consonant-onset words like "Wait" or "Stop"
+        #   produce high flux (> 0.15) and do NOT satisfy criteria 1.
+        is_backchannel_hum = bool(
+            spectral_flux < 0.07
+            and pitch_periodicity >= 0.35
+            and zcr < 0.18
+            and rms >= 0.005  # Must have some energy — pure silence is not a backchannel
+        )
 
         # Classification heuristics based on empirical acoustic boundaries:
         # 1. Acoustic Echo: High cross-correlation with outbound AI audio (> 0.60)
@@ -223,5 +281,7 @@ class AcousticFeatureExtractor:
             is_acoustic_echo=is_acoustic_echo,
             is_valid_speech=is_valid_speech,
             vocal_band_rms=vocal_band_rms,
-            vocal_energy_ratio=vocal_energy_ratio
+            vocal_energy_ratio=vocal_energy_ratio,
+            spectral_flux=spectral_flux,
+            is_backchannel_hum=is_backchannel_hum,
         )

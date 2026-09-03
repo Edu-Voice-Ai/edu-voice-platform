@@ -55,7 +55,7 @@ class SpeechToSpeechEngine:
         min_silence_duration_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 40,
-        min_barge_in_duration_ms: int = 80,
+        min_barge_in_duration_ms: int = 220,
         barge_in_min_confidence: float = 0.40,
         barge_in_min_rms: float = 0.008,
         vocal_energy_ratio_threshold: float = 0.35,
@@ -567,6 +567,33 @@ class SpeechToSpeechEngine:
             transcript_text = stt_res.text.strip()
             audio_duration_ms = len(audio_bytes) / (16.0 * 2.0)
             logger.info(f"[STT] Transcribed: '{transcript_text}' (detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
+
+            # ── Backchannel STT Token Guard ───────────────────────────────────────
+            # If the caller made a passive listening sound while the bot was speaking
+            # (e.g. "hmm", "uh-huh", "mm", "హ్మ్", "హా") and the transcript is ONLY
+            # that backchannel token, silently discard it and return to LISTENING.
+            # This prevents false "I couldn't hear you" clarifications triggered by
+            # natural acknowledgment sounds during bot speech.
+            _BACKCHANNEL_TOKENS = {
+                "hmm", "hm", "hmmm", "hmmmm", "mm", "mmm", "mhm", "m-hm",
+                "uh-huh", "uh huh", "uhhuh", "uh", "uhh",
+                "ok", "okay", "ah", "ahh",
+                # Telugu backchannel tokens (Sarvam STT representations)
+                "హ్మ్", "హ్మ", "మ్", "మ", "హా", "ఆ", "అవును",
+                # Hindi backchannel tokens
+                "हम्म", "हाँ", "हम",
+            }
+            _transcript_lower = transcript_text.lower().strip("., ")
+            _was_bot_speaking = getattr(self.session, "barge_in_timestamp_ms", 0.0) > 0.0 or \
+                                getattr(self.session, "turn_count", 0) > 0
+            if _transcript_lower in _BACKCHANNEL_TOKENS and _was_bot_speaking:
+                logger.info(
+                    f"[BACKCHANNEL_STT] Passive backchannel token '{transcript_text}' discarded silently "
+                    f"(bot was speaking). Returning to LISTENING without clarification."
+                )
+                self.session.current_turn.state = TurnStateEnum.LISTENING
+                self.session.user_has_floor = True
+                return
 
             # Check for empty / noise / inaudible transcript
             noise_tokens = {"[noise]", "<silence>", "[applause]", "[laughter]", "[cough]", "[throat-clearing]", "<blank>", "[blank]"}

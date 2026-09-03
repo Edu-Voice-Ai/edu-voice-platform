@@ -26,7 +26,7 @@ class TurnManager:
         language_selection_silence_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
-        min_barge_in_duration_ms: int = 80,
+        min_barge_in_duration_ms: int = 220,
         barge_in_min_confidence: float = 0.40,
         barge_in_min_rms: float = 0.008,
         vocal_energy_ratio_threshold: float = 0.35,
@@ -240,6 +240,21 @@ class TurnManager:
                             )
                     except Exception:
                         pass  # Degrade gracefully — don't block barge-in on profiler errors
+
+            # ── Backchannel / Passive-Listening Hum Suppressor ──────────────────────
+            # If the acoustic gate detects a monotone nasal hum ("hmmm", "mm", "uh-huh",
+            # "హ్మ్") while the bot is speaking, do NOT count it toward the barge-in
+            # accumulator.  Real interruptions ("ఆగండి", "Wait", "Stop") have high spectral
+            # flux (> 0.15) and won't be flagged as backchannels.
+            if is_qualifying and getattr(acoustic_features, "is_backchannel_hum", False):
+                logger.info(
+                    f"[BACKCHANNEL_DETECTED] Passive listening hum suppressed during bot playback "
+                    f"flux={getattr(acoustic_features, 'spectral_flux', 0.0):.3f} "
+                    f"pitch_p={getattr(acoustic_features, 'pitch_periodicity', 0.0):.3f} "
+                    f"zcr={getattr(acoustic_features, 'zcr', 0.0):.3f} "
+                    f"rms={getattr(acoustic_features, 'rms', 0.0):.4f}"
+                )
+                is_qualifying = False
 
             # ── Leaky Bucket accumulator ──────────────────────────────────────────
             # Telephony speech is NOT 100% consecutive: consonant closures (plosives like
