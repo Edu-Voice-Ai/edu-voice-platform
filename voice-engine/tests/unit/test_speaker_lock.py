@@ -236,8 +236,8 @@ class TestProfilePitchBand:
         speech = _make_voiced_speech(1200.0, f0=200.0, rms_target=0.10)
         profile = profiler.enroll_from_turn_audio(_split_into_chunks(speech))
         if profile and profile.pitch_f0_hz > 0:
-            assert abs(profile.pitch_lower_hz - profile.pitch_f0_hz * 0.65) < 5.0
-            assert abs(profile.pitch_upper_hz - profile.pitch_f0_hz * 1.35) < 5.0
+            assert abs(profile.pitch_lower_hz - profile.pitch_f0_hz * 0.75) < 5.0
+            assert abs(profile.pitch_upper_hz - profile.pitch_f0_hz * 1.25) < 5.0
 
     def test_repr_before_enrollment(self):
         """repr() should display 'enrolled=False' before enrollment."""

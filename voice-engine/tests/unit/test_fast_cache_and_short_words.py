@@ -88,12 +88,12 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
     session.current_turn.state = TurnStateEnum.SPEAKING
     queues = PipelineQueueBundle()
 
-    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=140)
+    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=240)
 
     # Frame of 20ms silence bytes
     dummy_frame = b"\x00" * 640
 
-    # Simulate 10 frames of 'Hmm' hum: high VAD conf, but quiet and low spectral flux
+    # Simulate 10 frames of 'Hmm' hum: high VAD conf, but quiet and low spectral flux (< 0.15, rms < 0.035)
     hum_features = AcousticFeatures(
         rms=0.015,
         snr_db=12.0,
@@ -108,11 +108,11 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
         is_valid_speech=True,
         vocal_band_rms=0.014,
         vocal_energy_ratio=0.85,
-        spectral_flux=0.02,  # Very low flux (static hum)
+        spectral_flux=0.02,  # Very low flux (static hum < 0.15)
         is_backchannel_hum=True
     )
 
-    for _ in range(10):
+    for _ in range(15):
         transition = tm.handle_speech_frame(
             is_speech=True,
             frame_data=dummy_frame,
@@ -120,13 +120,13 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
             vad_confidence=0.95,  # High VAD confidence!
             acoustic_features=hum_features
         )
-        assert transition is None, "Quiet Hmm must NOT trigger barge-in!"
+        assert transition is None, "Quiet Hmm (< 0.15 flux, < 0.035 rms) must NOT trigger barge-in!"
 
-    # Now simulate real interruption ("ఆగండి" / "Wait"):
-    # Opening vowel has high energy (vocal_rms=0.038, rms=0.040), must qualify even if initial flux is low
+    # Now simulate real spoken word ("ఆగండి" / "Wait"):
+    # Real speech has vocal_rms >= 0.030, spectral_flux >= 0.10, vocal_energy_ratio >= 0.55
     speech_features = AcousticFeatures(
-        rms=0.040,
-        snr_db=18.0,
+        rms=0.042,
+        snr_db=20.0,
         zcr=0.08,
         speech_band_ratio=0.90,
         pitch_periodicity=0.7,
@@ -137,13 +137,13 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
         is_acoustic_echo=False,
         is_valid_speech=True,
         vocal_band_rms=0.038,
-        vocal_energy_ratio=0.90,
-        spectral_flux=0.05,  # Even on initial vowel with low flux, high energy must NOT be suppressed!
+        vocal_energy_ratio=0.85,
+        spectral_flux=0.18,  # High spectral change from consonants/formant transitions
         is_backchannel_hum=False
     )
 
     triggered = False
-    for _ in range(8):  # 7 frames = 140ms
+    for _ in range(13):  # 12 frames = 240ms
         t = tm.handle_speech_frame(
             is_speech=True,
             frame_data=dummy_frame,
@@ -155,7 +155,98 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
             triggered = True
             break
 
-    assert triggered is True, "High energy word 'ఆగండి' (rms=0.040) must trigger barge-in within 140ms!"
+    assert triggered is True, "High energy word 'ఆగండి' (rms=0.042, flux=0.18) must trigger barge-in at 240ms!"
+
+
+def test_voice_lock_rejects_background_chatter_with_mismatched_pitch():
+    """Verify enrolled voice lock rejects background voice with mismatched pitch (> 25%)."""
+    import numpy as np
+    from app.audio.speaker_lock import AdaptiveSpeakerVoiceProfiler, CallerVoiceProfile
+    from app.audio.features import AcousticFeatures
+    from app.pipeline.turn_manager import TurnManager
+
+    session = SessionState(session_id="test_vlock", organization_id="org_test", agent_id="agent_test")
+    session.is_bot_speaking = True
+    session.active_playback_generation_id = "gen_playing_02"
+    session.current_turn.state = TurnStateEnum.SPEAKING
+    queues = PipelineQueueBundle()
+
+    # Enroll caller with pitch 140Hz
+    session.speaker_profiler._profile = CallerVoiceProfile(
+        pitch_f0_hz=140.0,
+        spectral_centroid_hz=800.0,
+        near_mic_crest_factor=3.5,
+        baseline_rms=0.05,
+        pitch_lower_hz=140.0 * 0.75,
+        pitch_upper_hz=140.0 * 1.25,
+    )
+    session.speaker_profiler.is_enrolled = True
+
+    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=240)
+
+    # Background voice frame with pitch = 240Hz (female or high pitch chatter 1m away, > 25% deviation)
+    sr = 16000
+    t = np.linspace(0, 0.020, 320, endpoint=False)
+    bg_audio = (0.045 * np.sin(2 * np.pi * 240.0 * t)).astype(np.float32)
+    bg_frame_bytes = (bg_audio * 32767).astype(np.int16).tobytes()
+
+    bg_features = AcousticFeatures(
+        rms=0.045,
+        snr_db=18.0,
+        zcr=0.08,
+        speech_band_ratio=0.88,
+        pitch_periodicity=0.8,
+        spectral_centroid=1200.0,
+        echo_correlation=0.0,
+        is_transient=False,
+        is_breath_or_mouth=False,
+        is_acoustic_echo=False,
+        is_valid_speech=True,
+        vocal_band_rms=0.040,
+        vocal_energy_ratio=0.85,
+        spectral_flux=0.20,
+        is_backchannel_hum=False
+    )
+
+    for _ in range(15):
+        t_out = tm.handle_speech_frame(
+            is_speech=True,
+            frame_data=bg_frame_bytes,
+            frame_duration_ms=20,
+            vad_confidence=0.90,
+            acoustic_features=bg_features
+        )
+        assert t_out is None, "Mismatched background pitch (240Hz vs 140Hz) must be REJECTED by Voice Lock!"
+
+
+def test_continuous_profile_refinement_every_5_turns():
+    """Verify voice profile is re-averaged at turn 5."""
+    import numpy as np
+    from app.audio.speaker_lock import AdaptiveSpeakerVoiceProfiler, CallerVoiceProfile
+
+    profiler = AdaptiveSpeakerVoiceProfiler(sample_rate=16000)
+    profiler._profile = CallerVoiceProfile(
+        pitch_f0_hz=150.0,
+        spectral_centroid_hz=800.0,
+        near_mic_crest_factor=3.5,
+        baseline_rms=0.05,
+        pitch_lower_hz=150.0 * 0.75,
+        pitch_upper_hz=150.0 * 1.25,
+    )
+    profiler.is_enrolled = True
+
+    # Generate new turn audio with pitch 170Hz
+    t = np.linspace(0, 0.5, 8000, endpoint=False)
+    turn_audio = (0.06 * np.sin(2 * np.pi * 170.0 * t)).astype(np.float32)
+
+    # Turn 4: should NOT refine
+    profiler.refine_profile(turn_audio, turn_number=4)
+    assert profiler.profile.pitch_f0_hz == 150.0
+
+    # Turn 5: SHOULD refine (re-averaged 70% historical, 30% new)
+    profiler.refine_profile(turn_audio, turn_number=5)
+    assert 150.0 < profiler.profile.pitch_f0_hz < 170.0
+    assert profiler.profile.pitch_lower_hz == profiler.profile.pitch_f0_hz * 0.75
 
 
 def test_telugu_ece_fee_query_matches_fast_router():

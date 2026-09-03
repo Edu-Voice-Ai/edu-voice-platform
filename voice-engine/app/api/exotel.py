@@ -234,12 +234,41 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
             if cycle_id != writer_state.get("last_handled_cancellation_cycle"):
                 writer_state["last_handled_cancellation_cycle"] = cycle_id
                 writer_state["last_clear_timestamp_ms"] = time.time() * 1000
+
+                # ── Graceful Audio Fadeout on Barge-In (Eliminate harsh YouTube pause cutoff) ──
+                # Apply a soft cosine amplitude fade-out over 60ms (3 outbound frames):
+                # Frame 1: 50% amplitude
+                # Frame 2: 12% amplitude
+                # Frame 3: 0% amplitude (silence)
+                last_pcm = writer_state.get("last_outbound_pcm")
+                if last_pcm and len(last_pcm) >= 160:
+                    try:
+                        samples = np.frombuffer(last_pcm, dtype=np.int16).astype(np.float32)
+                        enc = writer_state.get("encoding", "audio/x-l16")
+                        for scale in [0.50, 0.12, 0.0]:
+                            scaled_pcm = (samples * scale).astype(np.int16).tobytes()
+                            if "mulaw" in enc.lower() or "pcmu" in enc.lower():
+                                f_bytes = AudioCodec.pcm16_to_mulaw(scaled_pcm)
+                            else:
+                                f_bytes = scaled_pcm
+                            f_b64 = base64.b64encode(f_bytes).decode("ascii")
+                            await websocket.send_text(json.dumps({
+                                "event": "media",
+                                "stream_sid": sid,
+                                "streamSid": sid,
+                                "media": {"payload": f_b64}
+                            }))
+                            await asyncio.sleep(0.010)
+                    except Exception as fe:
+                        logger.debug(f"[BARGE_IN] Graceful fadeout skipped: {fe}")
+                writer_state["last_outbound_pcm"] = None
+
                 clear_msg = {
                     "event": "clear",
                     "stream_sid": sid,
                     "streamSid": sid
                 }
-                # 40ms of linear PCM 16-bit 8000Hz silence (640 zero bytes)
+                # 40ms of linear PCM 16-bit 8000Hz silence (640 zero bytes) to clear the DAC
                 silence_payload = base64.b64encode(b"\x00" * 640).decode("utf-8")
                 silence_msg = {
                     "event": "media",
@@ -257,6 +286,7 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
                         f"stream_sid={sid}\n"
                         f"cancellation_cycle={cycle_id}\n"
                         f"reason={reason}\n"
+                        f"fadeout_sent=True\n"
                         f"clear_sent=True\n"
                         f"clear_success=True\n"
                         f"clear_timestamp_ms={writer_state['last_clear_timestamp_ms']:.1f}",
@@ -479,6 +509,7 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
                         session.is_bot_speaking = True
 
                     writer_state["outbound_media_count"] += 1
+                    writer_state["last_outbound_pcm"] = pcm_resampled
                     count = writer_state["outbound_media_count"]
                     if count <= 5 or count % 50 == 0:
                         logger.info(

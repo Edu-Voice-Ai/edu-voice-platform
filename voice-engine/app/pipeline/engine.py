@@ -77,10 +77,10 @@ class SpeechToSpeechEngine:
         min_silence_duration_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 40,
-        min_barge_in_duration_ms: int = 140,
-        barge_in_min_confidence: float = 0.40,
-        barge_in_min_rms: float = 0.008,
-        vocal_energy_ratio_threshold: float = 0.35,
+        min_barge_in_duration_ms: int = 240,
+        barge_in_min_confidence: float = 0.70,
+        barge_in_min_rms: float = 0.030,
+        vocal_energy_ratio_threshold: float = 0.55,
     ):
         self.session = session
         self.vad_provider = vad_provider
@@ -524,9 +524,16 @@ class SpeechToSpeechEngine:
                 # before the profiler has locked onto a profile.
                 if not self.session.speaker_profiler.is_enrolled:
                     profile = self.session.speaker_profiler.try_enroll_from_accumulated()
+                    if profile is None and speech_bytes:
+                        try:
+                            pcm_f32 = np.frombuffer(speech_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                            profile = self.session.speaker_profiler.enroll_from_turn_audio([pcm_f32])
+                        except Exception:
+                            pass
+
                     if profile is not None:
                         logger.info(
-                            f"[SPEAKER_LOCK] Enrolled caller voice: "
+                            f"[SPEAKER_LOCK] Enrolled caller voice on Turn 1: "
                             f"pitch={profile.pitch_f0_hz:.1f}Hz "
                             f"centroid={profile.spectral_centroid_hz:.1f}Hz "
                             f"crest={profile.near_mic_crest_factor:.2f} "
@@ -534,6 +541,15 @@ class SpeechToSpeechEngine:
                         )
                     else:
                         logger.debug("[SPEAKER_LOCK] Insufficient audio for enrollment — will retry on next turn")
+                else:
+                    # Continuous Voice Profile Refinement every 5 turns
+                    turn_num = len(self.session.turns)
+                    if speech_bytes:
+                        try:
+                            pcm_f32 = np.frombuffer(speech_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                            self.session.speaker_profiler.refine_profile(pcm_f32, turn_number=turn_num)
+                        except Exception:
+                            pass
                 
                 logger.info(
                     f"[TURN {turn.turn_id}]\n"

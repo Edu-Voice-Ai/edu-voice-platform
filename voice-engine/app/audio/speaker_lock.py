@@ -18,6 +18,9 @@ import math
 import numpy as np
 from typing import Optional, List
 from dataclasses import dataclass, field
+from app.core.logging import get_logger
+
+logger = get_logger("audio.speaker_lock")
 
 
 @dataclass
@@ -27,8 +30,8 @@ class CallerVoiceProfile:
     spectral_centroid_hz: float  # Center of mass of the vocal spectrum in Hz
     near_mic_crest_factor: float # Peak-to-RMS ratio — near-field mic speech > 3.0; diffuse < 2.2
     baseline_rms: float          # Average active speech RMS of the primary caller
-    pitch_lower_hz: float        # pitch_f0 * 0.65 (±35% tolerance band)
-    pitch_upper_hz: float        # pitch_f0 * 1.35
+    pitch_lower_hz: float        # pitch_f0 * 0.75 (±25% tolerance band - strict)
+    pitch_upper_hz: float        # pitch_f0 * 1.25
 
 
 class AdaptiveSpeakerVoiceProfiler:
@@ -146,33 +149,29 @@ class AdaptiveSpeakerVoiceProfiler:
         if frame_audio is None or len(frame_audio) < 64:
             return 0.5
 
-        profile = self._profile
-        # Confident speech / high energy safety: near-field spoken utterances should never be rejected
-        if vad_confidence >= 0.70 or (frame_rms is not None and frame_rms >= 0.025):
-            return 1.0
-
         audio = frame_audio.astype(np.float32)
+        profile = self._profile
 
-        # ── Component 1: Pitch match ──────────────────────────────────────────────
+        # ── Component 1: Pitch match (40% weight) ─────────────────────────────────
         frame_f0 = self._estimate_pitch(audio)
         pitch_score = 0.0
         if frame_f0 > 0:
             if profile.pitch_lower_hz <= frame_f0 <= profile.pitch_upper_hz:
-                # Perfect match within tolerance band
+                # Perfect match within ±25% tolerance band
                 relative_dist = abs(frame_f0 - profile.pitch_f0_hz) / max(profile.pitch_f0_hz, 1.0)
                 pitch_score = max(0.0, 1.0 - relative_dist * 2.0)
             elif frame_f0 > 0:
-                # Outside tolerance: score drops rapidly
+                # Outside ±25% tolerance: score drops rapidly
                 dist_to_band = min(
                     abs(frame_f0 - profile.pitch_lower_hz),
                     abs(frame_f0 - profile.pitch_upper_hz)
                 )
-                pitch_score = max(0.0, 0.3 - dist_to_band / profile.pitch_f0_hz)
+                pitch_score = max(0.0, 0.25 - dist_to_band / profile.pitch_f0_hz)
         else:
             # Unvoiced / pitch undetectable — give neutral pitch score
             pitch_score = 0.5
 
-        # ── Component 2: Near-field proximity (crest factor + RMS) ───────────────
+        # ── Component 2: Near-field proximity (crest factor + RMS) (40% weight) ───
         rms = frame_rms if frame_rms is not None else self._compute_rms(audio)
         crest_factor = self._compute_crest_factor(audio, rms)
 
@@ -193,7 +192,7 @@ class AdaptiveSpeakerVoiceProfiler:
         else:
             proximity_score = max(0.0, 0.20 + (crest_factor / 10.0))
 
-        # ── Component 3: Spectral centroid match ─────────────────────────────────
+        # ── Component 3: Spectral centroid match (20% weight) ────────────────────
         if frame_spectral_centroid is not None and profile.spectral_centroid_hz > 0:
             relative_centroid_diff = abs(frame_spectral_centroid - profile.spectral_centroid_hz) / max(profile.spectral_centroid_hz, 1.0)
             centroid_score = max(0.0, 1.0 - relative_centroid_diff * 2.0)
@@ -207,6 +206,42 @@ class AdaptiveSpeakerVoiceProfiler:
             0.20 * centroid_score
         )
         return float(min(1.0, max(0.0, speaker_sim)))
+
+    def get_pitch(self, frame_audio: Optional[np.ndarray]) -> float:
+        """Estimate fundamental frequency (F0) in Hz from an audio frame."""
+        if frame_audio is None or len(frame_audio) < 64:
+            return 0.0
+        return float(self._estimate_pitch(frame_audio.astype(np.float32)))
+
+    def refine_profile(self, new_turn_audio: np.ndarray, turn_number: int):
+        """Every 5 turns, re-average the caller's voice profile using their latest speech samples."""
+        if not self.is_enrolled or self._profile is None:
+            return
+        if turn_number <= 0 or turn_number % 5 != 0:
+            return
+        if new_turn_audio is None or len(new_turn_audio) < 320:
+            return
+
+        combined = new_turn_audio.astype(np.float32)
+        new_prof = self._extract_profile(combined)
+        if new_prof is not None and new_prof.pitch_f0_hz > 0:
+            # Re-average caller's voice profile: 70% historical, 30% recent turn
+            f0 = 0.70 * self._profile.pitch_f0_hz + 0.30 * new_prof.pitch_f0_hz
+            centroid = 0.70 * self._profile.spectral_centroid_hz + 0.30 * new_prof.spectral_centroid_hz
+            crest = 0.70 * self._profile.near_mic_crest_factor + 0.30 * new_prof.near_mic_crest_factor
+            rms = 0.70 * self._profile.baseline_rms + 0.30 * new_prof.baseline_rms
+            self._profile = CallerVoiceProfile(
+                pitch_f0_hz=f0,
+                spectral_centroid_hz=centroid,
+                near_mic_crest_factor=crest,
+                baseline_rms=rms,
+                pitch_lower_hz=f0 * 0.75,
+                pitch_upper_hz=f0 * 1.25,
+            )
+            logger.info(
+                f"[SPEAKER_LOCK] Re-averaged caller profile at turn {turn_number}: "
+                f"f0={f0:.1f}Hz crest={crest:.2f} centroid={centroid:.1f}Hz"
+            )
 
     # ─────────────────────────────────────────────────────────────────────────────
     # Internal helpers
@@ -230,14 +265,14 @@ class AdaptiveSpeakerVoiceProfiler:
         crest_factor = self._compute_crest_factor(audio, rms)
         centroid = self._compute_spectral_centroid(audio)
 
-        # Enrollment tolerance band: ±35%
+        # Enrollment tolerance band: ±25% (strict frequency lock)
         return CallerVoiceProfile(
             pitch_f0_hz=f0,
             spectral_centroid_hz=centroid,
             near_mic_crest_factor=crest_factor,
             baseline_rms=rms,
-            pitch_lower_hz=f0 * 0.65,
-            pitch_upper_hz=f0 * 1.35,
+            pitch_lower_hz=f0 * 0.75,
+            pitch_upper_hz=f0 * 1.25,
         )
 
     @staticmethod

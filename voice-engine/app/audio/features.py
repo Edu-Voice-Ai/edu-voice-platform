@@ -227,16 +227,18 @@ class AcousticFeatureExtractor:
         spectral_flux, _ = cls.compute_spectral_flux(audio_float, prev_frame_fft, sample_rate)
 
         # is_backchannel_hum: A sound is ONLY a passive backchannel hum if:
-        #   spectral_flux < 0.08 AND vocal_band_rms < 0.025 AND rms < 0.025
-        # If vocal_band_rms >= 0.025 or rms >= 0.030, it is an OPEN-MOUTH VOCAL UTTERANCE
-        # (like "Aa..." in "ఆగండి", "Wait", "Stop", or a question) and must NEVER be classified as a hum!
+        # Strict Backchannel / Monotone Hum Detector:
+        # Passive listening sounds ("hmmm", "uh-huh", "mm", "ఊ", "హ్మ్") are characterized by:
+        # 1. Low spectral flux (< 0.15) — little to no formant transitions
+        # 2. RMS < 0.035 — gentle nasal/closed-mouth hums
+        # 3. High periodicity (>= 0.30) with low zero-crossing rate (< 0.22)
         is_backchannel_hum = bool(
-            spectral_flux < 0.08
-            and vocal_band_rms < 0.025
-            and rms < 0.025
-            and pitch_periodicity >= 0.35
-            and zcr < 0.18
-            and rms >= 0.005  # Must have some energy — pure silence is not a backchannel
+            spectral_flux < 0.15
+            and vocal_band_rms < 0.035
+            and rms < 0.035
+            and pitch_periodicity >= 0.30
+            and zcr < 0.22
+            and rms >= 0.003  # Must have some energy — pure silence is not a backchannel
         )
 
         # Classification heuristics based on empirical acoustic boundaries:

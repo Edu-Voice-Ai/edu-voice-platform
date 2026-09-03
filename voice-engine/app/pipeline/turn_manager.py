@@ -26,10 +26,10 @@ class TurnManager:
         language_selection_silence_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
-        min_barge_in_duration_ms: int = 140,
-        barge_in_min_confidence: float = 0.40,
-        barge_in_min_rms: float = 0.008,
-        vocal_energy_ratio_threshold: float = 0.35,
+        min_barge_in_duration_ms: int = 240,
+        barge_in_min_confidence: float = 0.70,
+        barge_in_min_rms: float = 0.030,
+        vocal_energy_ratio_threshold: float = 0.55,
         min_greeting_barge_in_frames: Optional[int] = None,
         on_barge_in_callback: Optional[Callable[[str, str], None]] = None
     ):
@@ -178,14 +178,20 @@ class TurnManager:
                 if broadband_rms < 0.001:
                     broadband_rms = 0.12
                 vocal_ratio = 0.85
+                flux_val = 0.25
+                if vad_confidence == 0.0 and is_speech:
+                    vad_confidence = 0.90
             else:
                 vocal_ratio = float(getattr(acoustic_features, "vocal_energy_ratio", 0.0) or getattr(acoustic_features, "speech_band_ratio", 0.0) or 0.0)
                 if vocal_ratio == 0.0 and getattr(acoustic_features, "is_valid_speech", True):
                     vocal_ratio = 0.85
                 if vocal_rms < 0.001 and getattr(acoustic_features, "is_valid_speech", True):
-                    vocal_rms = 0.12
+                    vocal_rms = broadband_rms if broadband_rms >= 0.001 else 0.12
                 if broadband_rms < 0.001 and getattr(acoustic_features, "is_valid_speech", True):
                     broadband_rms = 0.12
+                flux_val = float(getattr(acoustic_features, "spectral_flux", 0.5) or 0.5)
+                if vad_confidence == 0.0 and getattr(acoustic_features, "is_valid_speech", True) and is_speech:
+                    vad_confidence = 0.90
 
             if acoustic_features is not None:
                 echo_corr = float(getattr(acoustic_features, "echo_correlation", 0.0) or 0.0)
@@ -201,53 +207,33 @@ class TurnManager:
                 self.barge_in_pre_buffer.clear()
                 return None
 
-            # ── High-Energy Spoken Word Fast-Qualification ───────────────────────
-            # If vocal energy is strong (vocal_rms >= 0.030 or rms >= 0.030) with confident VAD,
-            # it is an open-mouth intentional spoken word ("ఆగండి", "Wait", "Stop", "Hello").
-            # Frame is 100% QUALIFYING for barge-in.
-            high_energy_speech = (
-                is_speech
-                and vad_confidence >= 0.60
-                and (vocal_rms >= 0.030 or broadband_rms >= 0.030)
-            )
+            # ── 1. Strict Backchannel & Monotone Hum Suppressor ──────────────────
+            # Any sound with spectral_flux < 0.15 AND rms < 0.035 is treated as backchannel/noise
+            # and NEVER counts toward barge-in bucket.
+            # Regardless of Silero confidence, static monotone hums (Hmm, Uh, mm, ఊ, హ్మ్) are blocked.
+            is_hum = bool(getattr(acoustic_features, "is_backchannel_hum", False)) if acoustic_features is not None else False
 
-            # ── Quiet Backchannel Hum Suppressor ─────────────────────────────────
-            # A sound is ONLY a passive backchannel hum if:
-            #   spectral_flux < 0.08 AND vocal_band_rms < 0.025 AND rms < 0.025
-            # If vocal_band_rms >= 0.025 or rms >= 0.030, it is an open-mouth vocal utterance
-            # (like "Aa..." in "ఆగండి") and must NEVER be suppressed.
-            is_quiet_backchannel = (
-                bool(getattr(acoustic_features, "is_backchannel_hum", False))
-                or (
-                    float(getattr(acoustic_features, "spectral_flux", 1.0) or 0.0) < 0.08
-                    and vocal_rms < 0.025
-                    and broadband_rms < 0.025
-                    and float(getattr(acoustic_features, "pitch_periodicity", 0.0) or 0.0) >= 0.30
-                )
-            ) if acoustic_features is not None else False
-
-            if high_energy_speech:
-                is_qualifying = True
-            elif is_quiet_backchannel:
-                flux_val = float(getattr(acoustic_features, "spectral_flux", 0.0) or 0.0)
-                rms_val = float(getattr(acoustic_features, "rms", 0.0) or 0.0)
+            if is_hum or (flux_val < 0.15 and broadband_rms < 0.035):
                 logger.info(
-                    f"[BACKCHANNEL_SUPPRESSED] flux={flux_val:.3f} rms={rms_val:.4f}"
+                    f"[BACKCHANNEL_SUPPRESSED] flux={flux_val:.3f} rms={broadband_rms:.4f}"
                 )
                 is_qualifying = False
             else:
-                # Moderate speech frame qualification:
-                # 1. Speech with decent confidence
-                # 2. Speech energy (vocal_rms >= 0.010 or rms >= 0.012)
-                # 3. Sufficient vocal ratio or confident VAD
+                # ── 2. Strict Multi-Gate Requirement (ALL must be TRUE) ───────────
+                # - is_speech == True (Silero VAD)
+                # - conf >= 0.70 (strict confidence)
+                # - vocal_band_rms >= 0.030 (real speech is loud on the phone)
+                # - spectral_flux >= 0.10 (real words have dynamic frequency changes)
+                # - vocal_energy_ratio >= 0.55 (must be human vocal tract sound)
                 is_qualifying = (
                     is_speech
                     and vad_confidence >= self.barge_in_min_confidence
-                    and (vocal_rms >= 0.010 or broadband_rms >= 0.012)
-                    and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.70)
+                    and (vocal_rms >= self.barge_in_min_rms or broadband_rms >= self.barge_in_min_rms)
+                    and flux_val >= 0.10
+                    and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
                 )
 
-                # ── Adaptive Speaker Identity Gate ───────────────────────────────
+                # ── 3. Adaptive Real-Time Caller Voice Frequency Lock ────────────
                 if is_qualifying:
                     profiler = getattr(self.session, "speaker_profiler", None)
                     if profiler is not None and profiler.is_enrolled:
@@ -259,17 +245,19 @@ class TurnManager:
                                 frame_spectral_centroid=float(getattr(acoustic_features, "spectral_centroid", 0.0) or 0.0) if acoustic_features else None,
                                 vad_confidence=vad_confidence
                             )
-                            if speaker_sim < 0.45 and vad_confidence < 0.90:
-                                logger.debug(
-                                    f"[SPEAKER_LOCK] Barge-in frame rejected as background noise "
-                                    f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
+                            observed_pitch = profiler.get_pitch(frame_audio) if frame_audio is not None else 0.0
+                            caller_pitch = profiler.profile.pitch_f0_hz if profiler.profile else 0.0
+                            pitch_dev = abs(observed_pitch - caller_pitch) / caller_pitch if (observed_pitch > 0 and caller_pitch > 0) else 0.0
+
+                            # REJECT frame as background if:
+                            # speaker_sim < 0.60 OR pitch_deviation > 25% from caller's enrolled F0
+                            if speaker_sim < 0.60 or (observed_pitch > 0 and pitch_dev > 0.25):
+                                logger.info(
+                                    f"[VOICE_LOCK_REJECTED] speaker_sim={speaker_sim:.2f} "
+                                    f"caller_pitch={caller_pitch:.0f}Hz observed_pitch={observed_pitch:.0f}Hz "
+                                    f"rms={vocal_rms:.3f} - rejected as non-caller sound"
                                 )
                                 is_qualifying = False
-                            elif speaker_sim < 0.55:
-                                logger.debug(
-                                    f"[SPEAKER_LOCK] Uncertain barge-in frame accepted (conf bypass) "
-                                    f"speaker_sim={speaker_sim:.3f} conf={vad_confidence:.3f}"
-                                )
                         except Exception:
                             pass  # Degrade gracefully — don't block barge-in on profiler errors
 
