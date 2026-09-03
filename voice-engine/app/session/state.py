@@ -141,8 +141,11 @@ class SessionState:
         if force or now_ms >= float(self.playback_estimated_end_time_ms or 0.0):
             self.is_bot_speaking = False
             self.playback_estimated_end_time_ms = 0.0
-            if self.current_turn and self.current_turn.state == TurnStateEnum.SPEAKING:
-                self.current_turn.state = TurnStateEnum.IDLE
+            self.user_has_floor = True
+            if hasattr(self, "conversation_state"):
+                self.conversation_state = "LISTENING"
+            if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.IDLE):
+                self.current_turn.state = TurnStateEnum.LISTENING
 
     def signal_playback_interrupt(self):
         """Wake the telephony writer immediately so it can send Exotel clear instead of finishing a pacing sleep."""

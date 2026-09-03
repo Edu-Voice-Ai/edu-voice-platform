@@ -169,3 +169,41 @@ def test_telugu_ece_fee_query_matches_fast_router():
     complexity = FastQueryRouter.classify_complexity(norm, q)
     assert complexity == QueryComplexity.SIMPLE
 
+
+def test_post_playback_state_reset_guarantee():
+    """Verify mark_playback_finished resets all speaking flags and arms VAD for LISTENING."""
+    session = SessionState(session_id="test_reset", organization_id="org_test", agent_id="agent_test")
+    session.is_bot_speaking = True
+    session.user_has_floor = False
+    session.active_playback_generation_id = "gen_123"
+    session.current_turn.state = TurnStateEnum.SPEAKING
+    assert session.is_assistant_speaking is True  # Computed property is True while speaking
+
+    session.mark_playback_finished(force=True)
+
+    assert session.is_bot_speaking is False
+    assert session.is_assistant_speaking is False
+    assert session.user_has_floor is True
+    assert session.active_playback_generation_id is None
+    assert session.current_turn.state == TurnStateEnum.LISTENING
+    assert session.conversation_state == "LISTENING"
+
+
+def test_telugu_hostel_and_course_queries_fast_route():
+    """Verify common Telugu queries match FastQueryRouter as SIMPLE."""
+    from app.rag.normalizer import SemanticQueryNormalizer, SemanticIntent
+    from app.conversation.router import FastQueryRouter, QueryComplexity
+
+    test_cases = [
+        ("కోర్సులు ఏమున్నాయి?", SemanticIntent.LIST_AVAILABLE_COURSES),
+        ("పార్సల్ ఫెసిలిటీ గురించి చెప్పండి.", SemanticIntent.HOSTEL_INQUIRY),
+        ("హాస్టల్ వివరాలు చెప్పండి", SemanticIntent.HOSTEL_INQUIRY),
+        ("హాస్టల్ ఫెసిలిటీ గురించి చెప్పండి.", SemanticIntent.HOSTEL_INQUIRY),
+    ]
+
+    for query_text, expected_intent in test_cases:
+        norm = SemanticQueryNormalizer.normalize(query_text)
+        assert norm.intent == expected_intent
+        complexity = FastQueryRouter.classify_complexity(norm, query_text)
+        assert complexity == QueryComplexity.SIMPLE
+

@@ -146,8 +146,12 @@ class AdaptiveSpeakerVoiceProfiler:
         if frame_audio is None or len(frame_audio) < 64:
             return 0.5
 
-        audio = frame_audio.astype(np.float32)
         profile = self._profile
+        # Confident speech / high energy safety: near-field spoken utterances should never be rejected
+        if vad_confidence >= 0.70 or (frame_rms is not None and frame_rms >= 0.025):
+            return 1.0
+
+        audio = frame_audio.astype(np.float32)
 
         # ── Component 1: Pitch match ──────────────────────────────────────────────
         frame_f0 = self._estimate_pitch(audio)

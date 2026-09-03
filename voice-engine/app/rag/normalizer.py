@@ -31,7 +31,7 @@ class SemanticQueryNormalizer:
     # Course Keywords (strict course identifiers only, not general inquiry terms)
     COURSE_MARKERS = {
         "course", "courses", "కోర్సులు", "కోర్సు", "కోర్స్", "కోర్సులున్నాయి", "కోర్సులున్నాయా",
-        "కోర్సుల", "కోర్సులేంటి", "కోర్సులేమిటి",
+        "కోర్సుల", "కోర్సులేంటి", "కోర్సులేమిటి", "కోర్సులు ఏమున్నాయి", "ఏమున్నాయి", "ఏమి కోర్సులు",
         "कोर्स", "कोर्सेस", "पाठ्यक्रम", "programs", "program", "degrees", "degree",
         "streams", "branch", "branches", "offer", "offering", "offers"
     }
@@ -61,7 +61,8 @@ class SemanticQueryNormalizer:
     # Hostel Keywords
     HOSTEL_MARKERS = {
         "hostel", "hostels", "accommodation", "room", "rooms", "stay", "mess",
-        "హాస్టల్", "హాస్టల్స్", "రూమ్", "భోజనం",
+        "హాస్టల్", "హాస్టల్స్", "రూమ్", "భోజనం", "వసతి", "హాస్టల్ వివరాలు", "హాస్టల్ ఫెసిలిటీ",
+        "పార్సల్",  # Sarvam STT frequent telephony homophone for హాస్టల్ (e.g. "పార్సల్ ఫెసిలిటీ")
         "हॉस्टल", "कमरा", "रहना"
     }
 

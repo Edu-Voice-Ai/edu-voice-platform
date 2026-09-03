@@ -332,9 +332,15 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
                 if event.event in (EventType.RESPONSE_END, "response.end"):
                     if session:
                         session.mark_playback_finished(force=True)
+                        session.is_bot_speaking = False
+                        session.user_has_floor = True
+                        if hasattr(session, "conversation_state"):
+                            session.conversation_state = "LISTENING"
+                        if session.current_turn and session.current_turn.state != TurnStateEnum.LISTENING_AFTER_BARGE_IN:
+                            session.current_turn.state = TurnStateEnum.LISTENING
                         logger.info(
                             f"[PLAYBACK_COMPLETE] Normal TTS/greeting playback finished: "
-                            f"gen_id={event.generation_id} is_bot_speaking=cleared",
+                            f"gen_id={event.generation_id} is_bot_speaking=cleared conversation_state=LISTENING",
                             extra={"session_id": event.session_id}
                         )
                     pacing_gen_id = None

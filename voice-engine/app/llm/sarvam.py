@@ -28,7 +28,7 @@ class SarvamLLMProvider(LLMProvider):
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or getattr(self._client, "is_closed", False):
             self._client = httpx.AsyncClient(
-                timeout=15.0,
+                timeout=httpx.Timeout(connect=3.0, read=4.5, write=3.0, pool=3.0),
                 limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
             )
         return self._client

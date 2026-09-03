@@ -1079,6 +1079,7 @@ class SpeechToSpeechEngine:
                 turn.state = TurnStateEnum.SPEAKING
                 turn.barge_in_handled = False
             self.session.is_bot_speaking = True
+            self.session.user_has_floor = False
             self.session.active_playback_generation_id = item_gen_id
             self.session.active_playback_turn_id = item_turn_id
             playback_lang = self.session.preferred_language or self.session.language or "en-IN"
@@ -1134,7 +1135,6 @@ class SpeechToSpeechEngine:
                     if (
                         not (token and token.is_cancelled)
                         and not self.session.is_generation_cancelled(item_gen_id)
-                        and not self.session.user_has_floor
                         and item_gen_id == self.session.active_playback_generation_id
                     ):
                         b64_audio = AudioCodec.frame_to_base64(frame)
@@ -1260,7 +1260,6 @@ class SpeechToSpeechEngine:
                     if (
                         not (token and token.is_cancelled)
                         and not self.session.is_generation_cancelled(item_gen_id)
-                        and not self.session.user_has_floor
                         and item_gen_id == self.session.active_playback_generation_id
                     ):
                         b64_audio = AudioCodec.frame_to_base64(frame)
@@ -1305,11 +1304,12 @@ class SpeechToSpeechEngine:
                     self.session.active_playback_turn_id = None
                     self.session.playback_estimated_end_time_ms = 0.0
                     self.session.user_has_floor = True
+                    self.session.conversation_state = "LISTENING"
 
             except Exception as e:
                 logger.error(f"TTS synthesis failed: {e}", extra={"session_id": self.session.session_id})
                 if turn:
-                    turn.state = TurnStateEnum.IDLE
+                    turn.state = TurnStateEnum.LISTENING
                 self.session.is_bot_speaking = False
                 self.session.active_playback_generation_id = None
                 self.session.active_playback_turn_id = None
