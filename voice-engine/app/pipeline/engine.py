@@ -77,10 +77,10 @@ class SpeechToSpeechEngine:
         min_silence_duration_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 40,
-        min_barge_in_duration_ms: int = 240,
+        min_barge_in_duration_ms: int = 180,
         barge_in_min_confidence: float = 0.70,
-        barge_in_min_rms: float = 0.030,
-        vocal_energy_ratio_threshold: float = 0.55,
+        barge_in_min_rms: float = 0.025,
+        vocal_energy_ratio_threshold: float = 0.50,
     ):
         self.session = session
         self.vad_provider = vad_provider

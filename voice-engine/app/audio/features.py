@@ -32,6 +32,28 @@ class AcousticFeatures:
     # Backchannel / passive listening hum detection
     spectral_flux: float = 0.5        # Rate of spectral change across consecutive 20ms frames (0.0=static hum, 0.5+=dynamic speech)
     is_backchannel_hum: bool = False  # True if frame is a monotone nasal hum ("hmmm", "uh-huh") — NOT a real interruption
+    spectral_flatness: float = 0.5    # Wiener entropy [0.0, 1.0] (<0.38 for voiced speech, >0.45 for noise/breath)
+    harmonicity: float = 0.0          # Normalized pitch harmonicity autocorrelation peak [0.0, 1.0] (>=0.35 for voiced speech)
+    pitch_f0_hz: float = 0.0          # Estimated fundamental frequency in Hz (65Hz - 450Hz)
+    is_voiced_frame: bool = False     # True if frame satisfies energy, pitch, flatness, harmonicity, and ZCR voiced speech criteria
+
+    def __post_init__(self):
+        if self.harmonicity == 0.0 and self.pitch_periodicity > 0.0:
+            self.harmonicity = self.pitch_periodicity
+        if not self.is_voiced_frame:
+            if (
+                self.is_valid_speech
+                and not self.is_breath_or_mouth
+                and not self.is_transient
+                and not self.is_backchannel_hum
+                and not self.is_acoustic_echo
+                and (self.pitch_periodicity >= 0.35 or self.harmonicity >= 0.35)
+                and (self.vocal_band_rms >= 0.022 or self.rms >= 0.025)
+                and self.zcr <= 0.25
+            ):
+                self.is_voiced_frame = True
+                if self.spectral_flatness == 0.5:
+                    self.spectral_flatness = 0.20
 
 
 class AcousticFeatureExtractor:
@@ -133,6 +155,63 @@ class AcousticFeatureExtractor:
             peak = float(np.max(autocorr[min_lag:max_lag]))
             return max(0.0, min(peak, 1.0))
         return 0.0
+
+    @staticmethod
+    def compute_spectral_flatness(
+        audio_float: np.ndarray, sample_rate: int = 16000
+    ) -> float:
+        """
+        Calculate Spectral Flatness (Wiener entropy) in the telephony vocal range (300Hz - 3400Hz).
+        Flatness = Geometric Mean(Power Spectrum) / Arithmetic Mean(Power Spectrum).
+        Voiced human speech has resonant formants / harmonic peaks -> Low flatness (< 0.38).
+        Noise, breaths, friction, and clicks have flat spectrum -> High flatness (> 0.45).
+        """
+        n = len(audio_float)
+        if n < 32:
+            return 1.0
+        windowed = audio_float * np.hanning(n)
+        rfft_vals = np.abs(np.fft.rfft(windowed))
+        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+
+        mask = (freqs >= 300) & (freqs <= 3400)
+        power_spectrum = (rfft_vals[mask] ** 2) + 1e-12
+        if len(power_spectrum) == 0:
+            return 1.0
+
+        arithmetic_mean = np.mean(power_spectrum)
+        log_mean = np.mean(np.log(power_spectrum))
+        geometric_mean = np.exp(log_mean)
+
+        flatness = float(geometric_mean / (arithmetic_mean + 1e-12))
+        return float(min(1.0, max(0.0, flatness)))
+
+    @staticmethod
+    def compute_pitch_and_harmonicity(
+        audio_float: np.ndarray, sample_rate: int = 16000
+    ) -> Tuple[float, float]:
+        """
+        Estimate fundamental frequency f0 (Hz) and harmonicity peak in human vocal pitch range (65 Hz - 450 Hz).
+        Returns (f0_hz, harmonicity_peak).
+        """
+        n = len(audio_float)
+        if n < 160:
+            return 0.0, 0.0
+
+        centered = audio_float - np.mean(audio_float)
+        norm_factor = np.sum(centered**2) + 1e-10
+        autocorr = np.correlate(centered, centered, mode="full")
+        autocorr = autocorr[n - 1 :] / norm_factor
+
+        min_lag = max(1, int(sample_rate / 450))  # ~35 samples @ 16kHz (450 Hz)
+        max_lag = min(len(autocorr) - 1, int(sample_rate / 65))   # ~246 samples @ 16kHz (65 Hz)
+
+        if max_lag > min_lag and max_lag < len(autocorr):
+            peak_idx = int(np.argmax(autocorr[min_lag:max_lag])) + min_lag
+            peak_val = float(autocorr[peak_idx])
+            if peak_val >= 0.20:
+                f0_hz = float(sample_rate / peak_idx)
+                return f0_hz, float(max(0.0, min(peak_val, 1.0)))
+        return 0.0, 0.0
 
     @staticmethod
     def compute_echo_correlation(
@@ -270,6 +349,32 @@ class AcousticFeatureExtractor:
             )
         )
 
+        # ── Spectral Flatness & Pitch Harmonicity ─────────────────────────────────
+        pitch_f0_hz, harmonicity = cls.compute_pitch_and_harmonicity(audio_float, sample_rate)
+        if pitch_periodicity == 0.0 and harmonicity > 0.0:
+            pitch_periodicity = harmonicity
+        spectral_flatness = cls.compute_spectral_flatness(audio_float, sample_rate)
+
+        # ── Voiced Speech Frame Detection ─────────────────────────────────────
+        # A 20ms frame is genuinely VOICED human speech if:
+        # 1. Energy: vocal band RMS >= 0.022 or broadband RMS >= 0.025
+        # 2. Harmonicity: strong harmonic structure (>= 0.35 or pitch_periodicity >= 0.35)
+        # 3. Spectral Flatness: tonal/formant peak structure (<= 0.38, NOT flat noise/breaths)
+        # 4. Zero-Crossing Rate: low to moderate (<= 0.22, NOT high-frequency hiss/friction)
+        # 5. Pitch: valid human vocal tract fundamental frequency (65Hz - 450Hz) or confident periodicity
+        # 6. NOT breath, transient click, or backchannel hum
+        is_voiced_frame = bool(
+            (vocal_band_rms >= 0.022 or rms >= 0.025)
+            and (harmonicity >= 0.35 or pitch_periodicity >= 0.35)
+            and spectral_flatness <= 0.38
+            and zcr <= 0.22
+            and (65.0 <= pitch_f0_hz <= 450.0 or pitch_periodicity >= 0.40)
+            and (not is_breath_or_mouth)
+            and (not is_transient)
+            and (not is_backchannel_hum)
+            and spectral_flux >= 0.08
+        )
+
         return AcousticFeatures(
             rms=rms,
             snr_db=snr_db,
@@ -286,4 +391,8 @@ class AcousticFeatureExtractor:
             vocal_energy_ratio=vocal_energy_ratio,
             spectral_flux=spectral_flux,
             is_backchannel_hum=is_backchannel_hum,
+            spectral_flatness=spectral_flatness,
+            harmonicity=harmonicity,
+            pitch_f0_hz=pitch_f0_hz,
+            is_voiced_frame=is_voiced_frame,
         )

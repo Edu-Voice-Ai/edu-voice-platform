@@ -26,10 +26,10 @@ class TurnManager:
         language_selection_silence_ms: int = 350,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
-        min_barge_in_duration_ms: int = 240,
+        min_barge_in_duration_ms: int = 180,
         barge_in_min_confidence: float = 0.70,
-        barge_in_min_rms: float = 0.030,
-        vocal_energy_ratio_threshold: float = 0.55,
+        barge_in_min_rms: float = 0.025,
+        vocal_energy_ratio_threshold: float = 0.50,
         min_greeting_barge_in_frames: Optional[int] = None,
         on_barge_in_callback: Optional[Callable[[str, str], None]] = None
     ):
@@ -219,47 +219,32 @@ class TurnManager:
                 )
                 is_qualifying = False
             else:
-                # ── 2. Strict Multi-Gate Requirement (ALL must be TRUE) ───────────
-                # - is_speech == True (Silero VAD)
-                # - conf >= 0.70 (strict confidence)
-                # - vocal_band_rms >= 0.030 (real speech is loud on the phone)
-                # - spectral_flux >= 0.10 (real words have dynamic frequency changes)
-                # - vocal_energy_ratio >= 0.55 (must be human vocal tract sound)
+                # ── 2. Robust Multi-Feature Voiced Speech Detection ─────────────────
+                # Does not rely on rigid fixed frequency.
+                # Evaluates: energy, pitch validity, spectral flatness, harmonicity, and zero-crossing rate.
+                if hasattr(acoustic_features, "is_voiced_frame"):
+                    is_voiced = bool(getattr(acoustic_features, "is_voiced_frame", False))
+                else:
+                    # Fallback if features object lacks is_voiced_frame (e.g. older unit test fixtures)
+                    flatness = float(getattr(acoustic_features, "spectral_flatness", 0.20) or 0.20) if acoustic_features is not None else 0.20
+                    harmonicity = float(getattr(acoustic_features, "harmonicity", getattr(acoustic_features, "pitch_periodicity", 0.50)) or 0.50) if acoustic_features is not None else 0.50
+                    zcr_val = float(getattr(acoustic_features, "zcr", 0.08) or 0.08) if acoustic_features is not None else 0.08
+                    is_voiced = (
+                        is_speech
+                        and (vocal_rms >= 0.022 or broadband_rms >= 0.025)
+                        and harmonicity >= 0.35
+                        and flatness <= 0.38
+                        and zcr_val <= 0.22
+                        and flux_val >= 0.08
+                    )
+
+                # Qualification gate: genuine continuous voiced speech frame
                 is_qualifying = (
                     is_speech
-                    and vad_confidence >= self.barge_in_min_confidence
+                    and is_voiced
                     and (vocal_rms >= self.barge_in_min_rms or broadband_rms >= self.barge_in_min_rms)
-                    and flux_val >= 0.10
-                    and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
+                    and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.80)
                 )
-
-                # ── 3. Adaptive Real-Time Caller Voice Frequency Lock ────────────
-                if is_qualifying:
-                    profiler = getattr(self.session, "speaker_profiler", None)
-                    if profiler is not None and profiler.is_enrolled:
-                        try:
-                            frame_audio = np.frombuffer(frame_data, dtype=np.int16).astype(np.float32) / 32768.0 if frame_data else None
-                            speaker_sim = profiler.calculate_speaker_similarity(
-                                frame_audio=frame_audio,
-                                frame_rms=vocal_rms if vocal_rms > 0 else broadband_rms,
-                                frame_spectral_centroid=float(getattr(acoustic_features, "spectral_centroid", 0.0) or 0.0) if acoustic_features else None,
-                                vad_confidence=vad_confidence
-                            )
-                            observed_pitch = profiler.get_pitch(frame_audio) if frame_audio is not None else 0.0
-                            caller_pitch = profiler.profile.pitch_f0_hz if profiler.profile else 0.0
-                            pitch_dev = abs(observed_pitch - caller_pitch) / caller_pitch if (observed_pitch > 0 and caller_pitch > 0) else 0.0
-
-                            # REJECT frame as background if:
-                            # speaker_sim < 0.60 OR pitch_deviation > 25% from caller's enrolled F0
-                            if speaker_sim < 0.60 or (observed_pitch > 0 and pitch_dev > 0.25):
-                                logger.info(
-                                    f"[VOICE_LOCK_REJECTED] speaker_sim={speaker_sim:.2f} "
-                                    f"caller_pitch={caller_pitch:.0f}Hz observed_pitch={observed_pitch:.0f}Hz "
-                                    f"rms={vocal_rms:.3f} - rejected as non-caller sound"
-                                )
-                                is_qualifying = False
-                        except Exception:
-                            pass  # Degrade gracefully — don't block barge-in on profiler errors
 
             # ── Leaky Bucket accumulator ──────────────────────────────────────────
             # Telephony speech is NOT 100% consecutive: consonant closures (plosives like

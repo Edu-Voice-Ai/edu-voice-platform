@@ -158,65 +158,104 @@ def test_backchannel_hum_suppressed_even_with_high_vad_confidence():
     assert triggered is True, "High energy word 'ఆగండి' (rms=0.042, flux=0.18) must trigger barge-in at 240ms!"
 
 
-def test_voice_lock_rejects_background_chatter_with_mismatched_pitch():
-    """Verify enrolled voice lock rejects background voice with mismatched pitch (> 25%)."""
+def test_robust_speech_detection_rejects_breaths_clicks_and_accepts_voiced_speech():
+    """Verify robust multi-feature gating: rejects breath, clicks, and hums, but triggers on continuous voiced speech (180ms)."""
     import numpy as np
-    from app.audio.speaker_lock import AdaptiveSpeakerVoiceProfiler, CallerVoiceProfile
-    from app.audio.features import AcousticFeatures
+    from app.audio.features import AcousticFeatures, AcousticFeatureExtractor
     from app.pipeline.turn_manager import TurnManager
 
-    session = SessionState(session_id="test_vlock", organization_id="org_test", agent_id="agent_test")
+    session = SessionState(session_id="test_robust_voiced", organization_id="org_test", agent_id="agent_test")
     session.is_bot_speaking = True
     session.active_playback_generation_id = "gen_playing_02"
     session.current_turn.state = TurnStateEnum.SPEAKING
     queues = PipelineQueueBundle()
 
-    # Enroll caller with pitch 140Hz
-    session.speaker_profiler._profile = CallerVoiceProfile(
-        pitch_f0_hz=140.0,
-        spectral_centroid_hz=800.0,
-        near_mic_crest_factor=3.5,
-        baseline_rms=0.05,
-        pitch_lower_hz=140.0 * 0.75,
-        pitch_upper_hz=140.0 * 1.25,
-    )
-    session.speaker_profiler.is_enrolled = True
+    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=180)
 
-    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=240)
-
-    # Background voice frame with pitch = 240Hz (female or high pitch chatter 1m away, > 25% deviation)
     sr = 16000
-    t = np.linspace(0, 0.020, 320, endpoint=False)
-    bg_audio = (0.045 * np.sin(2 * np.pi * 240.0 * t)).astype(np.float32)
-    bg_frame_bytes = (bg_audio * 32767).astype(np.int16).tobytes()
+    dummy_frame = b"\x00" * 640
 
-    bg_features = AcousticFeatures(
+    # 1. Breath noise: high ZCR, flat spectrum, low harmonicity
+    breath_features = AcousticFeatures(
+        rms=0.030,
+        snr_db=10.0,
+        zcr=0.42,
+        speech_band_ratio=0.30,
+        pitch_periodicity=0.12,
+        spectral_centroid=3400.0,
+        echo_correlation=0.0,
+        is_transient=False,
+        is_breath_or_mouth=True,
+        is_acoustic_echo=False,
+        is_valid_speech=False,
+        vocal_band_rms=0.015,
+        vocal_energy_ratio=0.30,
+        spectral_flux=0.18,
+        is_backchannel_hum=False,
+        spectral_flatness=0.58,  # High flatness (white-noise like)
+        harmonicity=0.12,
+        pitch_f0_hz=0.0,
+        is_voiced_frame=False
+    )
+    for _ in range(10):
+        assert tm.handle_speech_frame(True, dummy_frame, 20, 0.85, breath_features) is None, "Breath noise must NOT trigger barge-in!"
+
+    # 2. Transient line click: 1 frame burst with high centroid, zero harmonicity
+    click_features = AcousticFeatures(
+        rms=0.060,
+        snr_db=22.0,
+        zcr=0.02,
+        speech_band_ratio=0.40,
+        pitch_periodicity=0.05,
+        spectral_centroid=3900.0,
+        echo_correlation=0.0,
+        is_transient=True,
+        is_breath_or_mouth=False,
+        is_acoustic_echo=False,
+        is_valid_speech=False,
+        vocal_band_rms=0.020,
+        vocal_energy_ratio=0.40,
+        spectral_flux=0.60,
+        is_backchannel_hum=False,
+        spectral_flatness=0.62,
+        harmonicity=0.05,
+        pitch_f0_hz=0.0,
+        is_voiced_frame=False
+    )
+    assert tm.handle_speech_frame(True, dummy_frame, 20, 0.90, click_features) is None, "Line click must NOT trigger barge-in!"
+
+    # 3. Real Voiced Speech across different pitches (e.g. female 240Hz):
+    # energy >= 0.025, harmonicity >= 0.35, flatness <= 0.38, zcr <= 0.22, flux >= 0.08
+    voiced_features = AcousticFeatures(
         rms=0.045,
-        snr_db=18.0,
-        zcr=0.08,
+        snr_db=20.0,
+        zcr=0.09,
         speech_band_ratio=0.88,
-        pitch_periodicity=0.8,
-        spectral_centroid=1200.0,
+        pitch_periodicity=0.75,
+        spectral_centroid=1100.0,
         echo_correlation=0.0,
         is_transient=False,
         is_breath_or_mouth=False,
         is_acoustic_echo=False,
         is_valid_speech=True,
-        vocal_band_rms=0.040,
+        vocal_band_rms=0.038,
         vocal_energy_ratio=0.85,
-        spectral_flux=0.20,
-        is_backchannel_hum=False
+        spectral_flux=0.22,
+        is_backchannel_hum=False,
+        spectral_flatness=0.18,  # Low flatness (strong resonant formants)
+        harmonicity=0.75,
+        pitch_f0_hz=240.0,
+        is_voiced_frame=True
     )
 
-    for _ in range(15):
-        t_out = tm.handle_speech_frame(
-            is_speech=True,
-            frame_data=bg_frame_bytes,
-            frame_duration_ms=20,
-            vad_confidence=0.90,
-            acoustic_features=bg_features
-        )
-        assert t_out is None, "Mismatched background pitch (240Hz vs 140Hz) must be REJECTED by Voice Lock!"
+    triggered = False
+    for _ in range(10):  # 9 frames = 180ms continuous persistence
+        out = tm.handle_speech_frame(True, dummy_frame, 20, 0.92, voiced_features)
+        if out == "BARGE_IN":
+            triggered = True
+            break
+    assert triggered is True, "Continuous voiced frames (180ms) must trigger barge-in without fixed frequency restriction!"
+
 
 
 def test_continuous_profile_refinement_every_5_turns():
