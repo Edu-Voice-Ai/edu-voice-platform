@@ -63,6 +63,44 @@ class FastQueryRouter:
             return len(clean.split()) <= 6
         return False
 
+    UNOFFERED_COURSES_MAP = {
+        "mba": "MBA",
+        "mbbs": "MBBS",
+        "bba": "BBA",
+        "bcom": "B.Com",
+        "b.com": "B.Com",
+        "law": "Law",
+        "llb": "LLB",
+        "pharmacy": "Pharmacy",
+        "bpharm": "Pharmacy",
+        "medical": "Medical",
+        "mechanical": "Mechanical Engineering",
+        "mech": "Mechanical Engineering",
+        "civil": "Civil Engineering",
+        "arts": "Arts",
+        "mca": "MCA",
+        "diploma": "Diploma",
+        "ఎంబా": "MBA",
+        "ఎంబీఏ": "MBA",
+        "ఎంబిఎ": "MBA",
+        "ఎంబిబిఎస్": "MBBS",
+        "మెకానికల్": "Mechanical Engineering",
+        "సివిల్": "Civil Engineering"
+    }
+
+    @classmethod
+    def detect_unoffered_course(cls, text: str) -> Optional[str]:
+        """Detect if the caller is inquiring about a course/program that is not offered."""
+        clean = text.lower().strip()
+        words = re.findall(r'[\w\u0900-\u097F\u0C00-\u0C7F]+', clean)
+        for w in words:
+            if w in cls.UNOFFERED_COURSES_MAP:
+                return cls.UNOFFERED_COURSES_MAP[w]
+        for key, display_name in cls.UNOFFERED_COURSES_MAP.items():
+            if f" {key} " in f" {clean} ":
+                return display_name
+        return None
+
     @classmethod
     def classify_complexity(cls, normalized: NormalizedQuery, text: str) -> QueryComplexity:
         """Classify if query can be answered via Fast Path or needs LLM reasoning."""
@@ -108,6 +146,23 @@ class FastQueryRouter:
             bye_msg = cls.GOODBYE_RESPONSES.get(active_lang, cls.GOODBYE_RESPONSES["en-IN"])
             logger.info(f"[FAST_ROUTER] Explicit goodbye detected; returning graceful farewell: \"{bye_msg}\"", extra={"session_id": session.session_id})
             return QueryComplexity.GOODBYE, bye_msg
+
+        # 1b. Handle Unoffered Programs Policy: Clear 1-sentence refusal + human counselor offer
+        unoffered_match = cls.detect_unoffered_course(user_text)
+        if unoffered_match:
+            course_name = unoffered_match
+            if active_lang == "te-IN":
+                unoffered_resp = f"మా దగ్గర ప్రస్తుతం {course_name} కోర్స్ లేదు, కేవలం B.Tech CSE మరియు ECE మాత్రమే ఉన్నాయి. మీరు కౌన్సెలర్ తో మాట్లాడాలనుకుంటున్నారా?"
+            elif active_lang == "hi-IN":
+                unoffered_resp = f"हमारे पास अभी {course_name} कोर्स नहीं है, हम केवल B.Tech CSE और ECE प्रदान करते हैं। क्या आप काउंसलर से बात करना चाहेंगे?"
+            else:
+                unoffered_resp = f"We do not offer {course_name} right now; we currently offer B.Tech in CSE and ECE. Would you like me to connect you with a human counselor?"
+
+            logger.info(
+                f"[FAST_ROUTER] Unoffered program detected ({course_name}); returning policy response in {active_lang}",
+                extra={"session_id": session.session_id}
+            )
+            return QueryComplexity.SIMPLE, unoffered_resp
 
         # 2. Normalize and check complexity
         normalized = SemanticQueryNormalizer.normalize(user_text)

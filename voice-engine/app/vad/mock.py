@@ -1,5 +1,6 @@
 """Mock VAD Provider for deterministic testing."""
-from typing import List, Optional
+from typing import List, Optional, Any
+import numpy as np
 from app.audio.frames import AudioFrame
 from app.vad.base import VADProvider, VADResult
 
@@ -12,7 +13,7 @@ class MockVADProvider(VADProvider):
         self.default_is_speech = default_is_speech
         self.index = 0
 
-    async def is_speech(self, frame: AudioFrame) -> VADResult:
+    async def is_speech(self, frame: AudioFrame, outbound_ref: Optional[np.ndarray] = None, playback_active: bool = False) -> VADResult:
         if self.index < len(self.speech_sequence):
             res = self.speech_sequence[self.index]
             self.index += 1

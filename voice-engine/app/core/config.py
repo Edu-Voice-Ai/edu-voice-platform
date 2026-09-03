@@ -43,8 +43,9 @@ class Settings(BaseSettings):
     frame_duration_ms: int = Field(default=20, alias="FRAME_DURATION_MS")
 
     # VAD Parameters
-    vad_threshold: float = Field(default=0.35, alias="VAD_THRESHOLD")
-    min_silence_duration_ms: int = Field(default=450, alias="MIN_SILENCE_DURATION_MS")
+    vad_threshold: float = Field(default=0.50, alias="VAD_THRESHOLD")
+    vad_barge_in_threshold: float = Field(default=0.45, alias="VAD_BARGE_IN_THRESHOLD")
+    min_silence_duration_ms: int = Field(default=350, alias="MIN_SILENCE_DURATION_MS")
     min_speech_duration_ms: int = Field(default=60, alias="MIN_SPEECH_DURATION_MS")
 
     # Conversation Response Profile
@@ -57,11 +58,13 @@ class Settings(BaseSettings):
     tts_max_chars: int = Field(default=180, alias="TTS_MAX_CHARS")
 
     # Turn Detection & Structured Input Parameters
-    normal_silence_ms: int = Field(default=450, alias="NORMAL_SILENCE_MS")
+    normal_silence_ms: int = Field(default=350, alias="NORMAL_SILENCE_MS")
     short_utterance_silence_ms: int = Field(default=350, alias="SHORT_UTTERANCE_SILENCE_MS")
     language_selection_silence_ms: int = Field(default=350, alias="LANGUAGE_SELECTION_SILENCE_MS")
-    structured_input_silence_ms: int = Field(default=2000, alias="STRUCTURED_INPUT_SILENCE_MS")
+    structured_input_silence_ms: int = Field(default=1200, alias="STRUCTURED_INPUT_SILENCE_MS")
     barge_in_confirmation_ms: int = Field(default=80, alias="BARGE_IN_CONFIRMATION_MS")
+    barge_in_min_confidence: float = Field(default=0.45, alias="BARGE_IN_MIN_CONFIDENCE")
+    barge_in_min_rms: float = Field(default=0.010, alias="BARGE_IN_MIN_RMS")
     barge_in_acknowledgment_enabled: bool = Field(default=False, alias="BARGE_IN_ACKNOWLEDGMENT_ENABLED")
     phone_number_min_digits: int = Field(default=10, alias="PHONE_NUMBER_MIN_DIGITS")
     phone_number_max_digits: int = Field(default=15, alias="PHONE_NUMBER_MAX_DIGITS")

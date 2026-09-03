@@ -30,8 +30,9 @@ async def test_greeting_barge_in_and_idempotency():
 
     # 2. Simulate caller speaking during greeting (6 frames * 20ms = 120ms > 100ms threshold)
     transitions = []
+    loud_frame = b"\x10\x10" * 160
     for _ in range(6):
-        t = tm.handle_speech_frame(is_speech=True, frame_data=b"\x00"*320, frame_duration_ms=20.0)
+        t = tm.handle_speech_frame(is_speech=True, frame_data=loud_frame, frame_duration_ms=20.0)
         if t:
             transitions.append(t)
 

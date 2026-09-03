@@ -37,15 +37,41 @@ class SarvamTTSProvider(TTSProvider):
         self._client: Optional[httpx.AsyncClient] = None
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
+        if self._client is None or getattr(self._client, "is_closed", False):
+            try:
+                import h2
+                has_h2 = True
+            except ImportError:
+                has_h2 = False
+
             self._client = httpx.AsyncClient(
                 timeout=25.0,
-                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+                http2=has_h2,
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=120.0)
             )
         return self._client
 
+    async def prewarm(self) -> bool:
+        """Establish underlying TCP/TLS/HTTP-2 socket connection and warm TTS endpoint with 1-char dummy synthesis."""
+        if not self.api_key:
+            return False
+        try:
+            client = self._get_client()
+            # 1. Warm connection pool
+            await client.request("HEAD", f"{self.base_url}/", timeout=3.0)
+            # 2. Warm TTS generation endpoint with single character to cut first-turn latency
+            try:
+                await self.synthesize_text(".", language_code="en-IN")
+            except Exception:
+                pass
+            logger.info("[TTS] Persistent HTTP/2 connection and model endpoint pre-warmed")
+            return True
+        except Exception as e:
+            logger.debug(f"[TTS] Prewarm notice: {e}")
+            return False
+
     async def close(self):
-        if self._client and not self._client.is_closed:
+        if self._client and not getattr(self._client, "is_closed", False):
             await self._client.aclose()
 
     async def synthesize_text(

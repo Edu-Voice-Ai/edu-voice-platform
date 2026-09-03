@@ -51,6 +51,9 @@ async def test_concurrent_sessions_zero_leakage():
 
     await engine_a.start()
     await engine_b.start()
+    await asyncio.sleep(0.05)
+    sess_a.mark_playback_finished(force=True)
+    sess_b.mark_playback_finished(force=True)
 
     speech_frame = AudioFrame.silence(duration_ms=20)
     speech_frame.is_speech = True

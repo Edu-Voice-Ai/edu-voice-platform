@@ -98,8 +98,18 @@ class SpeechTextNormalizer:
         """
         Extracts a safe linguistic chunk from the text buffer.
         NEVER splits inside a word, acronym, name, or course title.
-        When is_first_chunk is True, extracts the first natural opening clause (6-28 chars)
-        as early as possible to minimize time-to-first-audio.
+
+        When is_first_chunk is True, extraction rules for the FIRST chunk:
+          - Sentence-ending punctuation (.!?।): fires immediately when candidate >= 3 chars.
+            Reason: guarantees genuinely short complete responses ("Yes.", "Sure!", "OK.") are
+            dispatched to Sarvam in a single call without waiting for nonexistent additional text.
+          - Mid-sentence clause punctuation (,;:—): requires candidate >= 20 chars before
+            dispatching as first chunk.
+            Reason: prevents "Yes," (3 chars before comma) from firing as a standalone first
+            TTS request when the LLM is already streaming the continuation ("I can help you...").
+            Sarvam charges the same ~1,600 ms per API call regardless of input length, so
+            combining "Yes, I can help you" into one call eliminates a wasted round-trip.
+          - Word-boundary fallback: fires when buffer accumulates >= 20 chars with no punctuation.
         
         Returns:
             (extracted_chunk, remaining_buffer)
@@ -125,21 +135,28 @@ class SpeechTextNormalizer:
             end_pos = m.start() if is_connector else m.end()
             candidate = cls.normalize_for_speech(working_buffer[:end_pos].strip())
             delimiter = m.group(1) or m.group(2) or m.group(3)
-            min_boundary_len = 3 if is_first_chunk else (min(min_chars, 6) if delimiter in ".!?।\n" else min_chars)
-            
-            # If is_first_chunk and a natural delimiter was found before 40 chars, extract immediately
+
             if is_first_chunk:
-                if len(candidate) >= min_boundary_len and len(candidate) <= 40 and cls.is_safe_chunk_boundary(candidate):
+                # Sentence-ending punctuation: fire immediately on any complete short phrase (>= 3 chars).
+                # e.g. "Yes." "Sure!" "OK." "అవును." "हाँ।" → single Sarvam call, correct.
+                is_sentence_end = delimiter in ".!?।\n"
+                # Mid-sentence clause punctuation: require >= 20 chars so that "Yes," (3 chars)
+                # does NOT fire alone when the LLM is already streaming "I can help you...".
+                # This combines e.g. "Yes, I can help" into one first Sarvam call.
+                first_chunk_min = 3 if is_sentence_end else 20
+                if len(candidate) >= first_chunk_min and len(candidate) <= 40 and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
             else:
+                # Non-first chunks: use standard min_chars thresholds.
+                min_boundary_len = min(min_chars, 6) if delimiter in ".!?।\n" else min_chars
                 if len(candidate) >= min_boundary_len and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
 
-        # 1b. For the very first chunk without early punctuation, if buffer reaches 28-35 chars, emit at word boundary
-        if is_first_chunk and len(working_buffer) >= 28:
-            first_slice = working_buffer[:35]
+        # 1b. For the very first chunk without early punctuation, if buffer reaches 20-30 chars, emit at word boundary
+        if is_first_chunk and len(working_buffer) >= 20:
+            first_slice = working_buffer[:32]
             space_matches = list(re.finditer(r'\s+', first_slice))
             if space_matches:
                 for sm in reversed(space_matches):

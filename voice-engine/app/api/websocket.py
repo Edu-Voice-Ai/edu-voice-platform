@@ -48,7 +48,11 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
     settings = get_settings()
 
     # VAD
-    vad = SileroVADProvider(threshold=settings.vad_threshold, sample_rate=settings.sample_rate)
+    vad = SileroVADProvider(
+        threshold=settings.vad_threshold,
+        barge_in_threshold=settings.vad_barge_in_threshold,
+        sample_rate=settings.sample_rate
+    )
 
     # STT
     if settings.sarvam_api_key:
@@ -102,7 +106,10 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
         tts_provider=tts,
         conversation_manager=conv_manager,
         min_silence_duration_ms=settings.normal_silence_ms,
-        structured_input_silence_ms=settings.structured_input_silence_ms
+        structured_input_silence_ms=settings.structured_input_silence_ms,
+        min_barge_in_duration_ms=settings.barge_in_confirmation_ms,
+        barge_in_min_confidence=settings.barge_in_min_confidence,
+        barge_in_min_rms=settings.barge_in_min_rms,
     )
 
 
@@ -120,6 +127,11 @@ async def voice_websocket_endpoint(websocket: WebSocket):
         while True:
             try:
                 event = await q.get()
+                if session:
+                    if event.event in (EventType.RESPONSE_CANCELLED, EventType.AUDIO_PLAYBACK_STOP, EventType.AUDIO_FLUSH):
+                        session.mark_playback_finished(force=True)
+                    elif event.event in (EventType.RESPONSE_END, "response.end"):
+                        session.mark_playback_finished(force=False)
                 payload = {
                     "event": event.event.value,
                     "session_id": event.session_id,

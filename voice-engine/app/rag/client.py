@@ -65,8 +65,16 @@ class MockRAGProvider(RAGProvider):
                     organization_id="org_apex_univ",
                     agent_id="agent_admission",
                     title="BTech Courses & Fees",
-                    content="Apex University offers BTech Computer Science and Engineering (CSE) with an annual fee of INR 1,50,000. BTech Electronics and Communication (ECE) fee is INR 1,20,000.",
+                    content="Apex University offers BTech Computer Science and Engineering (CSE) with an annual fee of INR 1,50,000. BTech Electronics and Communication (ECE) fee is INR 1,20,000. We only offer B.Tech in CSE and ECE. Other programs like MBA, MBBS, BBA, Law are not offered.",
                     category="fees"
+                ),
+                KnowledgeItem(
+                    id="kb_unoffered",
+                    organization_id="org_apex_univ",
+                    agent_id="agent_admission",
+                    title="Unoffered Programs Policy",
+                    content="Apex University only offers B.Tech in CSE and ECE. Courses like MBA, MBBS, BBA, B.Com, Pharmacy, Law, Mechanical, Civil, Arts are not offered. When asked, state clearly we do not offer that course right now, currently only offer B.Tech in CSE and ECE, and offer to connect with a human counselor.",
+                    category="courses"
                 ),
                 KnowledgeItem(
                     id="kb_2",
@@ -130,14 +138,15 @@ class MockRAGProvider(RAGProvider):
             if item.category in target_categories:
                 matched.append(item)
                 
-        # 2. Canonical search term matching
-        search_terms = set(normalized.canonical_keywords) | set(query.query_text.lower().split())
-        for item in tenant_items:
-            if item in matched:
-                continue
-            content_lower = item.content.lower() + " " + item.title.lower()
-            if any(term.lower() in content_lower for term in search_terms if len(term) > 2):
-                matched.append(item)
+        # 2. Canonical search term matching if specific category matching produced nothing
+        if not matched:
+            search_terms = set(normalized.canonical_keywords) | set(query.query_text.lower().split())
+            for item in tenant_items:
+                if item in matched:
+                    continue
+                content_lower = item.content.lower() + " " + item.title.lower()
+                if any(term.lower() in content_lower for term in search_terms if len(term) > 2):
+                    matched.append(item)
 
         # Fallback to tenant items if no specific match so LLM always has institution grounding
         if not matched and tenant_items:

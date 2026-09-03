@@ -132,8 +132,8 @@ def test_exotel_stream_lifecycle_and_barge_in():
                 }
             }))
 
-        # 6. Send Caller Interruption (Barge-in speech while AI generates/responds)
-        for chunk in speech_chunks[:10]: # 200ms speech
+        # 6. Send Caller Interruption (Barge-in speech while AI generates/responds: 16 chunks = 320ms > 300ms)
+        for chunk in speech_chunks[:16]:
             ws.send_text(json.dumps({
                 "event": "media",
                 "stream_sid": stream_sid,
@@ -144,8 +144,13 @@ def test_exotel_stream_lifecycle_and_barge_in():
 
         # 7. Verify 'clear' event is received on barge-in
         clear_received = False
-        for _ in range(30):
+        import time
+        t_start = time.time()
+        while time.time() - t_start < 4.0:
             try:
+                # Use a small timeout or non-blocking read if supported, else read available
+                import select
+                # Starlette TestClient WebSocket wraps raw websocket
                 msg_text = ws.receive_text()
                 msg = json.loads(msg_text)
                 if msg.get("event") == "clear":
@@ -153,13 +158,22 @@ def test_exotel_stream_lifecycle_and_barge_in():
                     clear_received = True
                     break
             except Exception:
+                time.sleep(0.05)
                 break
         
         # 8. Send Stop event
-        ws.send_text(json.dumps({
-            "event": "stop",
-            "stream_sid": stream_sid
-        }))
+        try:
+            ws.send_text(json.dumps({
+                "event": "stop",
+                "stream_sid": stream_sid
+            }))
+            time.sleep(0.05)
+        except Exception:
+            pass
+        try:
+            ws.close()
+        except Exception:
+            pass
 
     # Verify session cleaned up
     manager = get_session_manager()

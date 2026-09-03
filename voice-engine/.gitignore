@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Secrets & credentials — NEVER commit these
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets/
+credentials/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs & runtime artefacts
+*.log
+logs/
+*.pid
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# MyPy / type stubs
+.mypy_cache/
+.dmypy.json
+
+# Model files (large binaries — store in LFS or S3)
+*.onnx
+*.pt
+*.bin
+*.safetensors
+models/
+
+# Deploy artefacts
+deploy.tar.gz
+*.tar.gz

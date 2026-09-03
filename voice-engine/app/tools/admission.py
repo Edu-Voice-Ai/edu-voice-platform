@@ -27,9 +27,7 @@ class GetCoursesTool(BaseTool):
     async def execute(self, organization_id: str, agent_id: str, degree_level: str = "all", **kwargs) -> ToolExecutionResult:
         courses = [
             {"code": "BTECH-CSE", "name": "B.Tech Computer Science and Engineering", "duration": "4 Years", "seats": 180},
-            {"code": "BTECH-ECE", "name": "B.Tech Electronics and Communication Engineering", "duration": "4 Years", "seats": 120},
-            {"code": "BTECH-MECH", "name": "B.Tech Mechanical Engineering", "duration": "4 Years", "seats": 60},
-            {"code": "MBA", "name": "Master of Business Administration", "duration": "2 Years", "seats": 60}
+            {"code": "BTECH-ECE", "name": "B.Tech Electronics and Communication Engineering", "duration": "4 Years", "seats": 120}
         ]
         return ToolExecutionResult(tool_name=self.name, success=True, data={"organization_id": organization_id, "courses": courses})
 
