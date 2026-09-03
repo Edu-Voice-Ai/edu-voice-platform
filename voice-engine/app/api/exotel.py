@@ -217,7 +217,10 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
         "encoding": encoding,
         "sample_rate": sample_rate,
         "outbound_media_count": 0,
-        "last_handled_cancellation_cycle": -1
+        "last_handled_cancellation_cycle": -1,
+        "last_outbound_pcm": None,
+        "last_clear_timestamp_ms": 0.0,
+        "pacing_start_wall_time": 0.0,
     }
 
     async def exotel_audio_writer_loop(event_queue: asyncio.Queue[SessionEvent]):
@@ -241,7 +244,7 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
                 # Frame 2: 12% amplitude
                 # Frame 3: 0% amplitude (silence)
                 last_pcm = writer_state.get("last_outbound_pcm")
-                if last_pcm and len(last_pcm) >= 160:
+                if last_pcm is not None and isinstance(last_pcm, (bytes, bytearray)) and len(last_pcm) >= 160:
                     try:
                         samples = np.frombuffer(last_pcm, dtype=np.int16).astype(np.float32)
                         enc = writer_state.get("encoding", "audio/x-l16")
@@ -524,9 +527,12 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
                             "payload": outbound_b64
                         }
                     }
-                    await websocket.send_text(json.dumps(media_msg))
-                    if session:
-                        session.last_old_audio_send_timestamp_ms = time.time() * 1000
+                    try:
+                        await websocket.send_text(json.dumps(media_msg))
+                        if session:
+                            session.last_old_audio_send_timestamp_ms = time.time() * 1000
+                    except Exception as we:
+                        logger.warning(f"[EXOTEL_MEDIA_SEND_ERROR] stream_sid={sid} count={count} err={we}")
 
             except asyncio.CancelledError:
                 break
@@ -536,7 +542,8 @@ async def exotel_voice_stream_endpoint(websocket: WebSocket):
                     f"packet={writer_state.get('outbound_media_count')} error={e}",
                     exc_info=True
                 )
-                break
+                await asyncio.sleep(0.010)
+                continue
 
     try:
         while True:

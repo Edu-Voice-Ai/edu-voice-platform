@@ -189,7 +189,7 @@ class SpeechToSpeechEngine:
             )
             global _GREETING_AUDIO_CACHE
             if greeting_text not in _GREETING_AUDIO_CACHE:
-                pcm_bytes = await self.tts_provider.synthesize_text(greeting_text, language_code="en-IN")
+                pcm_bytes = await self.tts_provider.synthesize_text(greeting_text, language_code="en-IN", speaker="priya")
                 if pcm_bytes and len(pcm_bytes) >= 32000:
                     _GREETING_AUDIO_CACHE[greeting_text] = pcm_bytes
                     logger.info("[GREETING] Pre-cached static greeting audio for 0ms initial dispatch")
@@ -261,10 +261,14 @@ class SpeechToSpeechEngine:
 
             # Fetch from cache or synthesize via TTS provider in English
             global _GREETING_AUDIO_CACHE
-            if greeting_text in _GREETING_AUDIO_CACHE and len(_GREETING_AUDIO_CACHE[greeting_text]) >= 64000:
+            if greeting_text in _GREETING_AUDIO_CACHE and len(_GREETING_AUDIO_CACHE[greeting_text]) >= 32000:
                 pcm_bytes = _GREETING_AUDIO_CACHE[greeting_text]
             else:
-                pcm_bytes = await self.tts_provider.synthesize_text(greeting_text, language_code="en-IN")
+                try:
+                    pcm_bytes = await self.tts_provider.synthesize_text(greeting_text, language_code="en-IN", speaker="priya")
+                except Exception as te:
+                    logger.error(f"[GREETING] TTS synthesis failed: {te}")
+                    pcm_bytes = None
                 if not pcm_bytes or len(pcm_bytes) < 32000:
                     # Provide rich 4.5-second greeting audio fallback (144000 bytes @ 16kHz mono)
                     pcm_bytes = AudioFrame.silence(duration_ms=4500, sample_rate=16000).data
