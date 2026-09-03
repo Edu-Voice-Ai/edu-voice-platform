@@ -13,7 +13,7 @@ logger = get_logger("vad.silero")
 class SileroVADProvider(VADProvider):
     """Silero VAD using ONNX runtime with multi-feature acoustic discrimination and adaptive noise-floor tracking."""
 
-    def __init__(self, model_path: Optional[str] = None, threshold: float = 0.35, barge_in_threshold: float = 0.45, sample_rate: int = 16000):
+    def __init__(self, model_path: Optional[str] = None, threshold: float = 0.35, barge_in_threshold: float = 0.40, sample_rate: int = 16000):
         self.threshold = threshold
         self.barge_in_threshold = barge_in_threshold
         self.sample_rate = sample_rate
@@ -68,8 +68,10 @@ class SileroVADProvider(VADProvider):
         )
 
         # Update dynamic background noise floor only during sustained low-energy quiet periods (not spikes)
-        if not acoustic.is_transient and acoustic.rms < 0.008:
-            self._noise_floor = float(0.98 * self._noise_floor + 0.02 * max(acoustic.rms, 0.0005))
+        eff_vocal_rms = getattr(acoustic, "vocal_band_rms", acoustic.rms)
+        vocal_ratio = getattr(acoustic, "vocal_energy_ratio", acoustic.speech_band_ratio)
+        if not acoustic.is_transient and eff_vocal_rms < 0.008:
+            self._noise_floor = float(0.98 * self._noise_floor + 0.02 * max(eff_vocal_rms, 0.0005))
 
         if self.session is not None:
             try:
@@ -90,20 +92,27 @@ class SileroVADProvider(VADProvider):
                 effective_threshold = self.barge_in_threshold if playback_active else self.threshold
                 raw_vad_speech = bool(self._last_conf >= effective_threshold)
 
-                # Filter out false positives (transient clicks, mouth puffs, breathing).
+                # Filter out false positives (transient clicks, mouth puffs, breathing, broadband noise).
                 # Do not drop loud inbound as echo — that is the caller talking over TTS.
                 if raw_vad_speech:
-                    if acoustic.is_acoustic_echo and acoustic.rms < 0.04:
+                    if acoustic.is_acoustic_echo and eff_vocal_rms < 0.04:
                         is_sp = False
                     elif acoustic.is_transient and self._consecutive_speech_frames == 0:
                         is_sp = False
                     elif acoustic.is_breath_or_mouth and self._last_conf < 0.70:
                         is_sp = False
+                    elif vocal_ratio < 0.35 and acoustic.rms >= 0.02 and self._last_conf < 0.85 and not acoustic.is_valid_speech:
+                        # Loud sound with non-vocal spectrum, low confidence, and no harmonicity -> NOISE
+                        is_sp = False
                     else:
                         is_sp = True
                 else:
                     # If acoustic harmonicity and SNR are strong (e.g. human voice, phonemes, vowels)
-                    if acoustic.is_valid_speech and (self._last_conf >= 0.15 or (acoustic.pitch_periodicity >= 0.35 and acoustic.snr_db >= 5.0)):
+                    if (
+                        acoustic.is_valid_speech
+                        and (eff_vocal_rms >= 0.008 or acoustic.rms >= 0.010)
+                        and (self._last_conf >= 0.15 or (acoustic.pitch_periodicity >= 0.35 and acoustic.snr_db >= 5.0))
+                    ):
                         is_sp = True
                     else:
                         is_sp = False
@@ -119,14 +128,18 @@ class SileroVADProvider(VADProvider):
                 logger.warning(f"Silero ONNX inference error: {ex}")
 
         # Multi-feature Acoustic Fallback VAD (used if ONNX is unavailable)
-        is_sp = acoustic.is_valid_speech
+        is_sp = bool(
+            acoustic.is_valid_speech
+            and (vocal_ratio >= 0.60 or vocal_ratio == 0.0)
+            and eff_vocal_rms >= 0.012
+        )
         if is_sp:
             self._consecutive_speech_frames += 1
         else:
             self._consecutive_speech_frames = 0
 
         confidence = float(np.clip((acoustic.pitch_periodicity * 0.5) + (min(acoustic.snr_db, 20.0) / 40.0), 0.0, 1.0))
-        return VADResult(is_speech=is_sp, confidence=confidence, raw_score=acoustic.rms, acoustic_features=acoustic)
+        return VADResult(is_speech=is_sp, confidence=confidence, raw_score=eff_vocal_rms, acoustic_features=acoustic)
 
     def reset(self) -> None:
         """Reset internal recurrence state, streaming context buffer, and frame counters."""

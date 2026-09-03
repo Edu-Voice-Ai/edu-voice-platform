@@ -24,6 +24,7 @@ from app.llm.base import LLMProvider
 from app.tts.base import TTSProvider
 from app.conversation.manager import ConversationManager
 from app.conversation.language import LanguagePreferenceParser
+from app.conversation.prompts import INAUDIBLE_CLARIFICATION_PHRASES, INAUDIBLE_ESCALATION_PHRASES
 from app.conversation.router import FastQueryRouter, QueryComplexity
 from app.metrics.latency import TurnMetrics, LatencyTracker
 from app.metrics.events import MetricsCollector
@@ -55,8 +56,9 @@ class SpeechToSpeechEngine:
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 40,
         min_barge_in_duration_ms: int = 80,
-        barge_in_min_confidence: float = 0.45,
-        barge_in_min_rms: float = 0.010,
+        barge_in_min_confidence: float = 0.40,
+        barge_in_min_rms: float = 0.008,
+        vocal_energy_ratio_threshold: float = 0.35,
     ):
         self.session = session
         self.vad_provider = vad_provider
@@ -76,6 +78,7 @@ class SpeechToSpeechEngine:
             min_barge_in_duration_ms=min_barge_in_duration_ms,
             barge_in_min_confidence=barge_in_min_confidence,
             barge_in_min_rms=barge_in_min_rms,
+            vocal_energy_ratio_threshold=vocal_energy_ratio_threshold,
             on_barge_in_callback=self._handle_barge_in_event
         )
 
@@ -372,11 +375,15 @@ class SpeechToSpeechEngine:
             frame.is_speech = vad_res.is_speech
 
             rms = float(np.sqrt(np.mean(np.square(frame.to_numpy_float32())))) if len(frame.data) > 0 else 0.0
-            if vad_res.is_speech or vad_res.confidence >= 0.15 or rms >= 0.015 or frame_count % 50 == 0:
+            acoustic = getattr(vad_res, "acoustic_features", None)
+            vocal_rms = float(getattr(acoustic, "vocal_band_rms", rms) or 0.0)
+            vocal_ratio = float(getattr(acoustic, "vocal_energy_ratio", 0.0) or 0.0)
+            if vad_res.is_speech or vad_res.confidence >= 0.15 or rms >= 0.012 or frame_count % 50 == 0:
                 stt_depth = getattr(self._stt_session, "queue_depth", 0) if self._stt_session else 0
                 stt_healthy = getattr(self._stt_session, "is_stream_healthy", False) if self._stt_session else False
                 logger.info(
                     f"[VAD_FRAME #{frame_count}] is_speech={vad_res.is_speech} conf={vad_res.confidence:.4f} rms={rms:.4f} "
+                    f"vocal_rms={vocal_rms:.4f} vocal_ratio={vocal_ratio:.2f} "
                     f"state={self.turn_manager.current_state} user_floor={self.session.user_has_floor} "
                     f"in_q={self.queues.audio_in_queue.qsize()} stt_q={stt_depth} stt_ok={stt_healthy}"
                 )
@@ -534,12 +541,74 @@ class SpeechToSpeechEngine:
                 self._current_metrics.stt_end_time_ms = time.time() * 1000
 
             transcript_text = stt_res.text.strip()
-            logger.info(f"[STT] Transcribed: '{transcript_text}' (detected: {stt_res.language_code}, duration={len(audio_bytes)/(16*2):.0f}ms)")
-            if not transcript_text:
-                logger.info("Empty transcript received; returning to LISTENING")
-                self.session.current_turn.state = TurnStateEnum.LISTENING
-                self.session.user_has_floor = True
+            audio_duration_ms = len(audio_bytes) / (16.0 * 2.0)
+            logger.info(f"[STT] Transcribed: '{transcript_text}' (detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
+
+            # Check for empty / noise / inaudible transcript
+            noise_tokens = {"[noise]", "<silence>", "[applause]", "[laughter]", "[cough]", "[throat-clearing]", "<blank>", "[blank]"}
+            is_inaudible = (
+                not transcript_text
+                or transcript_text.lower() in noise_tokens
+                or all(c in " ._-,?!" for c in transcript_text)
+            )
+
+            if is_inaudible:
+                # Guard against false idle triggers: only trigger clarification if VAD actually detected user speech frames >= 100ms
+                speech_detected_ms = max(audio_duration_ms, getattr(self.turn_manager, "last_finalized_speech_ms", 0.0))
+                if speech_detected_ms < 100.0:
+                    logger.info("Empty transcript received but speech duration < 100ms (idle line); returning to LISTENING")
+                    self.session.current_turn.state = TurnStateEnum.LISTENING
+                    self.session.user_has_floor = True
+                    return
+
+                self.session.consecutive_empty_turns = getattr(self.session, "consecutive_empty_turns", 0) + 1
+                active_lang = self.session.preferred_language or self.session.language or "en-IN"
+
+                if self.session.consecutive_empty_turns <= 2:
+                    clarification = INAUDIBLE_CLARIFICATION_PHRASES.get(active_lang, INAUDIBLE_CLARIFICATION_PHRASES["en-IN"])
+                else:
+                    clarification = INAUDIBLE_ESCALATION_PHRASES.get(active_lang, INAUDIBLE_ESCALATION_PHRASES["en-IN"])
+
+                logger.info(
+                    f"[INAUDIBLE_AUDIO] Inaudible/empty STT transcript on turn {turn_id} "
+                    f"(consecutive_empty_turns={self.session.consecutive_empty_turns}, speech_ms={speech_detected_ms:.0f}). "
+                    f"Speaking clarification: \"{clarification}\""
+                )
+
+                if not token.is_cancelled and self.session.is_active:
+                    turn = self.session.current_turn
+                    if turn:
+                        turn.generated_text = clarification
+                    self.session.last_response_text = clarification
+                    self.session.append_message(role="assistant", content=clarification)
+
+                    self._emit_event(SessionEvent(
+                        event=EventType.RESPONSE_TEXT_DELTA,
+                        session_id=self.session.session_id,
+                        turn_id=turn_id,
+                        generation_id=generation_id,
+                        data={"delta": clarification}
+                    ))
+
+                    await self.queues.tts_in_queue.put({
+                        "delta": clarification,
+                        "turn_id": turn_id,
+                        "generation_id": generation_id,
+                        "token": token
+                    })
+                    await self.queues.tts_in_queue.put({
+                        "delta": "__EOF__",
+                        "turn_id": turn_id,
+                        "generation_id": generation_id,
+                        "token": token
+                    })
+                else:
+                    self.session.current_turn.state = TurnStateEnum.IDLE
+                    self.session.user_has_floor = False
                 return
+
+            # Reset consecutive empty turns counter on any valid transcript
+            self.session.consecutive_empty_turns = 0
 
             # Multi-segment numeric accumulator for phone numbers & structured input
             mode = getattr(self.session, "structured_input_mode", "NORMAL")
@@ -903,6 +972,7 @@ class SpeechToSpeechEngine:
             turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == item_turn_id) else self.session.current_turn
             if turn:
                 turn.state = TurnStateEnum.SPEAKING
+                turn.barge_in_handled = False
             self.session.is_bot_speaking = True
             self.session.active_playback_generation_id = item_gen_id
             self.session.active_playback_turn_id = item_turn_id

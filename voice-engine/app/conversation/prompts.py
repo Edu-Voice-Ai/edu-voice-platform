@@ -7,6 +7,18 @@ LANGUAGE_STYLE_MAPPING = {
     "en-IN": "indian_english"
 }
 
+INAUDIBLE_CLARIFICATION_PHRASES = {
+    "en-IN": "I didn't catch that clearly. Could you please repeat?",
+    "te-IN": "మీ మాట నాకు స్పష్టంగా వినిపించలేదు, దయచేసి మళ్ళీ చెప్పగలరా?",
+    "hi-IN": "मुझे आपकी आवाज़ साफ़ सुनाई नहीं दी, क्या आप दोबारा कह सकते हैं?",
+}
+
+INAUDIBLE_ESCALATION_PHRASES = {
+    "en-IN": "I'm having trouble hearing you. Would you like me to connect you with an admissions counselor?",
+    "te-IN": "నాకు మీ స్వరం సరిగ్గా వినిపించడం లేదు. అడ్మిషన్స్ కౌన్సెలర్ తో మాట్లాడించమంటారా?",
+    "hi-IN": "मुझे आपकी आवाज़ सुनने में परेशानी हो रही है। क्या आप एडमिशन काउंसलर से बात करना चाहेंगे?",
+}
+
 VOICE_CONVERSATION_GUIDELINES = """
 VOICE CONVERSATION & CONCISENESS RULES:
 1. You are Priya, a friendly, warm, and professional phone-based admission counselor talking to a student or parent on a live voice call.

@@ -93,6 +93,7 @@ class SessionState:
     two_minute_permission_asked: bool = False
     consent_clarification_asked: bool = False
     consent_granted: Optional[bool] = None
+    consecutive_empty_turns: int = 0
     is_greeting_playing: bool = False
     greeting_state: GreetingStateEnum = GreetingStateEnum.NOT_STARTED
     generation_states: Dict[str, GenerationLifecycleState] = field(default_factory=dict)

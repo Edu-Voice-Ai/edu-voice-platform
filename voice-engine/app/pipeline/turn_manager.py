@@ -27,8 +27,9 @@ class TurnManager:
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
         min_barge_in_duration_ms: int = 80,
-        barge_in_min_confidence: float = 0.45,
-        barge_in_min_rms: float = 0.010,
+        barge_in_min_confidence: float = 0.40,
+        barge_in_min_rms: float = 0.008,
+        vocal_energy_ratio_threshold: float = 0.35,
         min_greeting_barge_in_frames: Optional[int] = None,
         on_barge_in_callback: Optional[Callable[[str, str], None]] = None
     ):
@@ -43,6 +44,7 @@ class TurnManager:
         self.min_barge_in_duration_ms = min_barge_in_duration_ms
         self.barge_in_min_confidence = barge_in_min_confidence
         self.barge_in_min_rms = barge_in_min_rms
+        self.vocal_energy_ratio_threshold = vocal_energy_ratio_threshold
         self.min_barge_in_frames = max(1, int(min_barge_in_duration_ms / 20.0))
         self.min_greeting_barge_in_frames: int = (
             min_greeting_barge_in_frames
@@ -146,22 +148,44 @@ class TurnManager:
 
         # 1. Immediate Interruption Detection while AI is actively speaking / playing audio
         if is_active_playback:
+            active_gen = getattr(self.session, "active_playback_generation_id", None)
             if turn.barge_in_handled:
-                return None
+                # If a new generation or turn is actively speaking, re-arm barge-in
+                if active_gen and active_gen != getattr(turn, "_barge_in_cancelled_gen_id", None):
+                    turn.barge_in_handled = False
+                else:
+                    return None
 
             is_echo = False
             is_valid_barge_in = False
 
-            inbound_rms = float(getattr(acoustic_features, "rms", 0.0) or 0.0) if acoustic_features is not None else 0.0
-            if inbound_rms == 0.0 and frame_data:
+            vocal_rms = float(getattr(acoustic_features, "vocal_band_rms", 0.0) or getattr(acoustic_features, "rms", 0.0) or 0.0) if acoustic_features is not None else 0.0
+            broadband_rms = float(getattr(acoustic_features, "rms", 0.0) or 0.0) if acoustic_features is not None else 0.0
+            if (vocal_rms == 0.0 or broadband_rms == 0.0) and frame_data:
                 try:
                     raw_arr = np.frombuffer(frame_data, dtype=np.int16).astype(np.float32) / 32768.0
-                    inbound_rms = float(np.sqrt(np.mean(np.square(raw_arr)))) if len(raw_arr) > 0 else 0.0
+                    calc_rms = float(np.sqrt(np.mean(np.square(raw_arr)))) if len(raw_arr) > 0 else 0.0
+                    if vocal_rms == 0.0:
+                        vocal_rms = calc_rms
+                    if broadband_rms == 0.0:
+                        broadband_rms = calc_rms
                 except Exception:
                     pass
-            elif inbound_rms == 0.0 and not frame_data and acoustic_features is None and vad_confidence >= self.barge_in_min_confidence:
-                # Default synthetic/mock test frames without raw PCM data to normal human speech level
-                inbound_rms = 0.12
+
+            if acoustic_features is None:
+                if vocal_rms < 0.001:
+                    vocal_rms = 0.12
+                if broadband_rms < 0.001:
+                    broadband_rms = 0.12
+                vocal_ratio = 0.85
+            else:
+                vocal_ratio = float(getattr(acoustic_features, "vocal_energy_ratio", 0.0) or getattr(acoustic_features, "speech_band_ratio", 0.0) or 0.0)
+                if vocal_ratio == 0.0 and getattr(acoustic_features, "is_valid_speech", True):
+                    vocal_ratio = 0.85
+                if vocal_rms < 0.001 and getattr(acoustic_features, "is_valid_speech", True):
+                    vocal_rms = 0.12
+                if broadband_rms < 0.001 and getattr(acoustic_features, "is_valid_speech", True):
+                    broadband_rms = 0.12
 
             if acoustic_features is not None:
                 echo_corr = float(getattr(acoustic_features, "echo_correlation", 0.0) or 0.0)
@@ -177,12 +201,14 @@ class TurnManager:
                 self.barge_in_pre_buffer.clear()
                 return None
 
-            # Robust Barge-in gating: require is_speech AND conf >= barge_in_min_confidence AND rms >= barge_in_min_rms
-            # This rejects quiet TV, typing, background sounds, or breathing puffs
+            # Calibrated Telephony Barge-in Qualification Rule:
+            # A frame during playback is speech if:
+            # is_speech is True and conf >= 0.40 and (vocal_band_rms >= 0.008 or rms >= 0.010) and (vocal_energy_ratio >= 0.35 or conf >= 0.85)
             is_qualifying = (
                 is_speech
                 and vad_confidence >= self.barge_in_min_confidence
-                and inbound_rms >= self.barge_in_min_rms
+                and (vocal_rms >= self.barge_in_min_rms or broadband_rms >= 0.010)
+                and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
             )
 
             # ── Leaky Bucket accumulator ──────────────────────────────────────────
@@ -224,6 +250,7 @@ class TurnManager:
                     f"context={'greeting' if is_greeting else 'conversational'}"
                 )
                 turn.barge_in_handled = True
+                turn._barge_in_cancelled_gen_id = active_gen
                 self.session.is_greeting_playing = False
                 self.session.greeting_state = GreetingStateEnum.COMPLETED
                 self.session.is_bot_speaking = False
@@ -236,7 +263,44 @@ class TurnManager:
             return None
 
         # 2. Normal speech detection (when AI is NOT speaking/processing/greeting)
-        if is_speech and not is_active_playback:
+        inbound_vocal_rms = float(getattr(acoustic_features, "vocal_band_rms", 0.0) or getattr(acoustic_features, "rms", 0.0) or 0.0) if acoustic_features is not None else 0.0
+        broadband_rms = float(getattr(acoustic_features, "rms", 0.0) or 0.0) if acoustic_features is not None else 0.0
+        if (inbound_vocal_rms == 0.0 or broadband_rms == 0.0) and frame_data:
+            try:
+                raw_arr = np.frombuffer(frame_data, dtype=np.int16).astype(np.float32) / 32768.0
+                calc_rms = float(np.sqrt(np.mean(np.square(raw_arr)))) if len(raw_arr) > 0 else 0.0
+                if inbound_vocal_rms == 0.0:
+                    inbound_vocal_rms = calc_rms
+                if broadband_rms == 0.0:
+                    broadband_rms = calc_rms
+            except Exception:
+                pass
+
+        if acoustic_features is None:
+            if inbound_vocal_rms < 0.001:
+                inbound_vocal_rms = 0.12
+            if broadband_rms < 0.001:
+                broadband_rms = 0.12
+            vocal_ratio = 0.85
+        else:
+            vocal_ratio = float(getattr(acoustic_features, "vocal_energy_ratio", 0.0) or getattr(acoustic_features, "speech_band_ratio", 0.0) or 0.0)
+            if vocal_ratio == 0.0 and getattr(acoustic_features, "is_valid_speech", True):
+                vocal_ratio = 0.85
+            if inbound_vocal_rms < 0.001 and getattr(acoustic_features, "is_valid_speech", True):
+                inbound_vocal_rms = 0.12
+            if broadband_rms < 0.001 and getattr(acoustic_features, "is_valid_speech", True):
+                broadband_rms = 0.12
+
+        # Guard speech start: A frame is genuine speech if:
+        # is_speech is True and conf >= 0.40 and energy, with spectral ratio or high confidence
+        is_genuine_speech = bool(
+            is_speech
+            and vad_confidence >= 0.40
+            and (inbound_vocal_rms >= self.barge_in_min_rms or broadband_rms >= 0.010)
+            and (vocal_ratio >= self.vocal_energy_ratio_threshold or vad_confidence >= 0.85)
+        )
+
+        if is_genuine_speech and not is_active_playback:
             self._speech_accumulated_ms += frame_duration_ms
             self._total_turn_speech_ms += frame_duration_ms
             self._consecutive_silence_frames = 0
@@ -266,7 +330,7 @@ class TurnManager:
             return None
 
         # 3. Silence / Pause detection using dynamic context-aware adaptive threshold
-        if not is_speech:
+        if not is_genuine_speech:
             self._speech_accumulated_ms = 0.0
             self.barge_in_pre_buffer.clear()
             if self._is_in_speech:

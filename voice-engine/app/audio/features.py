@@ -4,6 +4,15 @@ from typing import Optional, Tuple
 import numpy as np
 
 
+try:
+    from scipy import signal as scipy_signal
+    _VOCAL_BAND_SOS_16K = scipy_signal.butter(4, [300, 3400], btype="bandpass", fs=16000, output="sos")
+    _VOCAL_BAND_SOS_8K = scipy_signal.butter(4, [300, 3400], btype="bandpass", fs=8000, output="sos")
+except Exception:
+    _VOCAL_BAND_SOS_16K = None
+    _VOCAL_BAND_SOS_8K = None
+
+
 @dataclass
 class AcousticFeatures:
     """Multi-feature acoustic properties of an audio chunk."""
@@ -18,10 +27,59 @@ class AcousticFeatures:
     is_breath_or_mouth: bool
     is_acoustic_echo: bool
     is_valid_speech: bool
+    vocal_band_rms: float = 0.0
+    vocal_energy_ratio: float = 0.0
 
 
 class AcousticFeatureExtractor:
     """Analyzes audio signals using energy, spectral distribution, pitch periodicity, and echo correlation."""
+
+    @classmethod
+    def filter_vocal_band(cls, audio_float: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
+        """Apply 300Hz - 3400Hz Butterworth bandpass filter to isolate human vocal tract frequencies."""
+        if len(audio_float) < 16:
+            return audio_float
+        sos = _VOCAL_BAND_SOS_16K if sample_rate == 16000 else _VOCAL_BAND_SOS_8K
+        if sos is not None:
+            try:
+                from scipy import signal as scipy_signal
+                return scipy_signal.sosfilt(sos, audio_float).astype(np.float32)
+            except Exception:
+                pass
+        # Fallback FFT bandpass filter if scipy filter is unavailable
+        n = len(audio_float)
+        rfft_vals = np.fft.rfft(audio_float)
+        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+        mask = (freqs >= 300) & (freqs <= 3400)
+        rfft_vals[~mask] = 0.0
+        return np.fft.irfft(rfft_vals, n=n).astype(np.float32)
+
+    @classmethod
+    def compute_vocal_band_features(
+        cls, audio_float: np.ndarray, sample_rate: int = 16000
+    ) -> Tuple[float, float, float]:
+        """
+        Calculate telephony speech-band energy ratio (300Hz - 3400Hz), vocal band RMS, and spectral centroid.
+        Returns: (vocal_band_rms, vocal_energy_ratio, spectral_centroid)
+        """
+        if len(audio_float) < 16:
+            return 0.0, 0.0, 0.0
+
+        vocal_filtered = cls.filter_vocal_band(audio_float, sample_rate)
+        vocal_band_rms = cls.compute_rms(vocal_filtered)
+
+        n = len(audio_float)
+        windowed = audio_float * np.hanning(n)
+        fft_vals = np.abs(np.fft.rfft(windowed))
+        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+
+        total_energy = np.sum(fft_vals**2) + 1e-10
+        speech_band_mask = (freqs >= 300) & (freqs <= 3400)
+        speech_band_energy = np.sum(fft_vals[speech_band_mask]**2)
+        vocal_energy_ratio = float(min(1.0, max(0.0, speech_band_energy / total_energy)))
+
+        centroid = float(np.sum(freqs * fft_vals) / (np.sum(fft_vals) + 1e-10))
+        return vocal_band_rms, vocal_energy_ratio, centroid
 
     @staticmethod
     def compute_rms(audio_float: np.ndarray) -> float:
@@ -38,29 +96,13 @@ class AcousticFeatureExtractor:
         zero_crossings = np.sum(np.abs(np.diff(np.sign(audio_float)))) / 2.0
         return float(zero_crossings / len(audio_float))
 
-    @staticmethod
+    @classmethod
     def compute_speech_band_and_centroid(
-        audio_float: np.ndarray, sample_rate: int = 16000
+        cls, audio_float: np.ndarray, sample_rate: int = 16000
     ) -> Tuple[float, float]:
-        """
-        Calculate telephony speech-band energy ratio (300Hz - 3400Hz) and spectral centroid.
-        Returns: (speech_band_ratio, spectral_centroid)
-        """
-        if len(audio_float) < 32:
-            return 0.0, 0.0
-
-        n = len(audio_float)
-        windowed = audio_float * np.hanning(n)
-        fft_vals = np.abs(np.fft.rfft(windowed))
-        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
-
-        total_energy = np.sum(fft_vals**2) + 1e-10
-        speech_band_mask = (freqs >= 300) & (freqs <= 3400)
-        speech_band_energy = np.sum(fft_vals[speech_band_mask]**2)
-        speech_band_ratio = float(speech_band_energy / total_energy)
-
-        centroid = float(np.sum(freqs * fft_vals) / (np.sum(fft_vals) + 1e-10))
-        return speech_band_ratio, centroid
+        """Calculate telephony speech-band energy ratio (300Hz - 3400Hz) and spectral centroid."""
+        _, vocal_energy_ratio, centroid = cls.compute_vocal_band_features(audio_float, sample_rate)
+        return vocal_energy_ratio, centroid
 
     @staticmethod
     def compute_pitch_periodicity(
@@ -132,9 +174,10 @@ class AcousticFeatureExtractor:
     ) -> AcousticFeatures:
         """Perform comprehensive acoustic feature analysis on an audio frame."""
         rms = cls.compute_rms(audio_float)
-        snr_db = 20.0 * np.log10(max(rms, 1e-6) / max(noise_floor, 1e-6))
+        vocal_band_rms, vocal_energy_ratio, centroid = cls.compute_vocal_band_features(audio_float, sample_rate)
+        speech_band_ratio = vocal_energy_ratio
+        snr_db = 20.0 * np.log10(max(vocal_band_rms, 1e-6) / max(noise_floor, 1e-6))
         zcr = cls.compute_zcr(audio_float)
-        speech_band_ratio, centroid = cls.compute_speech_band_and_centroid(audio_float, sample_rate)
         pitch_periodicity = cls.compute_pitch_periodicity(audio_float, sample_rate)
         echo_corr = cls.compute_echo_correlation(audio_float, outbound_ref)
 
@@ -154,12 +197,13 @@ class AcousticFeatureExtractor:
             (rms > 0.05 and pitch_periodicity < 0.10 and centroid >= 3800)
         )
 
-        # 4. Valid Speech: Requires harmonic structure, telephony speech-band energy, and SNR above noise floor
+        # 4. Valid Speech: Requires vocal energy concentration, harmonic structure, and SNR above noise floor
         is_valid_speech = bool(
             (not is_acoustic_echo) and
             (not is_breath_or_mouth) and
             (not is_transient) and
             (
+                (vocal_energy_ratio >= 0.60 and vocal_band_rms >= 0.012 and (pitch_periodicity >= 0.20 or snr_db >= 3.0)) or
                 (pitch_periodicity >= 0.25 and speech_band_ratio >= 0.15 and snr_db >= 3.0) or
                 (speech_band_ratio >= 0.40 and snr_db >= 6.0 and pitch_periodicity >= 0.20) or
                 (rms >= 0.035 and pitch_periodicity >= 0.25 and speech_band_ratio >= 0.15)
@@ -177,5 +221,7 @@ class AcousticFeatureExtractor:
             is_transient=is_transient,
             is_breath_or_mouth=is_breath_or_mouth,
             is_acoustic_echo=is_acoustic_echo,
-            is_valid_speech=is_valid_speech
+            is_valid_speech=is_valid_speech,
+            vocal_band_rms=vocal_band_rms,
+            vocal_energy_ratio=vocal_energy_ratio
         )
