@@ -1,4 +1,5 @@
 """ConversationManager coordinating prompt assembly, tool execution, language selection, and message history."""
+import asyncio
 from typing import List, Dict, Any, Optional
 from app.session.state import SessionState
 from app.rag.base import RAGProvider, RetrievalQuery
@@ -7,15 +8,12 @@ from app.conversation.prompts import build_admission_system_prompt
 from app.conversation.language import (
     LanguageDetector,
     LanguagePreferenceParser,
-    ConsentResponseParser,
+    LANGUAGE_SELECTION_ACKNOWLEDGMENT,
     INITIAL_ACKNOWLEDGMENT,
-    CONSENT_REQUEST_PROMPT,
-    CONSENT_YES_RESPONSE,
-    CONSENT_NO_RESPONSE,
-    CONSENT_AMBIGUOUS_CLARIFICATION,
     SWITCH_ACKNOWLEDGMENT,
     LANGUAGE_CLARIFICATION_PROMPT
 )
+from app.rag.normalizer import SemanticQueryNormalizer, SemanticIntent
 from app.core.logging import get_logger
 
 logger = get_logger("conversation.manager")
@@ -52,49 +50,21 @@ class ConversationManager:
                 session.preferred_language = switch_lang
                 session.language = switch_lang
                 session.waiting_for_consent = False
-                session.conversation_state = "LISTENING"
-                logger.info(f"Language switched to: {switch_lang}", extra={"session_id": session.session_id})
-                return SWITCH_ACKNOWLEDGMENT.get(switch_lang, SWITCH_ACKNOWLEDGMENT["en-IN"])
-
-        # 2. Handle Consent Evaluation if session is waiting for consent
-        if getattr(session, "waiting_for_consent", False):
-            consent_type = ConsentResponseParser.parse_consent_response(user_text)
-            active_lang = session.preferred_language or session.language or "en-IN"
-            
-            if consent_type == "YES":
-                session.waiting_for_consent = False
                 session.consent_granted = True
                 session.conversation_state = "LISTENING"
-                
-                # Check if the user combined consent with an inquiry e.g. "అవును, BTech fee ఎంత?"
-                clean = user_text.lower().strip()
-                is_specific_inquiry = any(q in clean for q in [
-                    "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility", "admission", "admissions",
-                    "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
-                    "ఫీస్", "कब", "कितना", "कोर्स"
-                ])
-                if not is_specific_inquiry:
-                    return CONSENT_YES_RESPONSE.get(active_lang, CONSENT_YES_RESPONSE["en-IN"])
-                return None
+                logger.info(f"Language switched to: {switch_lang}", extra={"session_id": session.session_id})
 
-            elif consent_type == "NO":
-                session.waiting_for_consent = False
-                session.consent_granted = False
-                session.conversation_state = "CLOSING"
-                return CONSENT_NO_RESPONSE.get(active_lang, CONSENT_NO_RESPONSE["en-IN"])
+                # Check if user asked a question along with the switch (e.g. 'Switch to Hindi, what is the CSE fee?')
+                remaining_q = LanguagePreferenceParser.strip_language_switch_phrases(user_text)
+                is_specific_inquiry = self._check_is_domain_inquiry(session, remaining_q)
 
-            else:  # AMBIGUOUS
-                if not getattr(session, "consent_clarification_asked", False):
-                    session.consent_clarification_asked = True
-                    return CONSENT_AMBIGUOUS_CLARIFICATION.get(active_lang, CONSENT_AMBIGUOUS_CLARIFICATION["en-IN"])
-                else:
-                    # After 1 clarification, if still ambiguous, proceed to conversation
-                    session.waiting_for_consent = False
-                    session.consent_granted = True
-                    session.conversation_state = "LISTENING"
-                    return CONSENT_YES_RESPONSE.get(active_lang, CONSENT_YES_RESPONSE["en-IN"])
+                if is_specific_inquiry:
+                    # User asked a domain question along with language switch -> route directly to FastQueryRouter/LLM in new language!
+                    return None
 
-        # 3. Initial selection
+                return SWITCH_ACKNOWLEDGMENT.get(switch_lang, SWITCH_ACKNOWLEDGMENT["en-IN"])
+
+        # 2. Initial language selection (transitions directly to LISTENING with zero two-minute consent)
         if not session.language_selection_complete:
             selected_lang = LanguagePreferenceParser.parse_language_preference(user_text)
             
@@ -108,14 +78,46 @@ class ConversationManager:
             session.preferred_language = selected_lang
             session.language = selected_lang
             session.language_selection_complete = True
-            session.waiting_for_consent = True
-            session.two_minute_permission_asked = True
-            session.conversation_state = "WAITING_FOR_TWO_MINUTE_CONSENT"
-            logger.info(f"Language preference selected: {selected_lang}, requesting two-minute consent", extra={"session_id": session.session_id})
-            
-            return CONSENT_REQUEST_PROMPT.get(selected_lang, CONSENT_REQUEST_PROMPT["en-IN"])
+            session.waiting_for_consent = False
+            session.consent_granted = True
+            session.conversation_state = "LISTENING"
+            logger.info(f"Language preference selected: {selected_lang}, proceeding to normal conversation", extra={"session_id": session.session_id})
+
+            # Check if user directly asked an inquiry or domain question along with language selection
+            is_specific_inquiry = self._check_is_domain_inquiry(session, user_text)
+
+            if is_specific_inquiry:
+                # User asked a direct domain question right away -> Let FastQueryRouter / LLM answer immediately!
+                return None
+
+            # If user only specified the language (e.g. "English", "Telugu", "Hindi"):
+            # Acknowledge in the chosen language and prompt for their question!
+            from app.conversation.language import LANGUAGE_SELECTION_ACKNOWLEDGMENT
+            return LANGUAGE_SELECTION_ACKNOWLEDGMENT.get(selected_lang, LANGUAGE_SELECTION_ACKNOWLEDGMENT["en-IN"])
 
         return None
+
+    def _check_is_domain_inquiry(self, session: SessionState, text: str) -> bool:
+        """Check if utterance contains domain-relevant questions based on the active agent template."""
+        if not text:
+            return False
+        clean = text.lower().strip()
+        template_type = getattr(session, "template_type", "education")
+
+        if template_type == "education":
+            norm_q = SemanticQueryNormalizer.normalize(text)
+            has_domain_intent = norm_q and norm_q.intent != SemanticIntent.GENERAL_INQUIRY
+            return has_domain_intent or any(q in clean for q in [
+                "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility",
+                "admission", "admissions", "placement", "placements", "campus", "scholarship", "btech", "mtech",
+                "b.tech", "m.tech", "mba", "bba", "apply", "how to apply", "offer", "offering", "programs",
+                "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
+                "ఎలా", "ఉన్నాయి", "ఉంది", "చెప్పండి", "ఫీస్", "कब", "कितना", "कोर्स", "एडमिशन", "बताइए", "क्या"
+            ]) or (len(clean.split()) >= 3 and any(c in text for c in "?¿"))
+        else:
+            from app.templates.registry import AgentTemplateRegistry
+            template = AgentTemplateRegistry.get_template(template_type)
+            return template.is_domain_query(text) or (len(clean.split()) >= 3 and any(c in text for c in "?¿"))
 
     async def assemble_llm_messages(
         self,
@@ -140,7 +142,7 @@ class ConversationManager:
 
         active_lang = session.preferred_language or session.language or "en-IN"
 
-        # 2. Retrieve verified tenant knowledge if RAG is available
+        # 2. Retrieve verified tenant knowledge with a short timeout so RAG cannot block LLM TTFT.
         verified_context = ""
         if self.rag_provider:
             query = RetrievalQuery(
@@ -149,17 +151,25 @@ class ConversationManager:
                 query_text=latest_user_text,
                 top_k=2
             )
-            retrieval_res = await self.rag_provider.retrieve(query)
-            if retrieval_res.has_verified_info:
-                verified_context = "\n".join(f"- [{item.title}]: {item.content}" for item in retrieval_res.items)
+            try:
+                retrieval_res = await asyncio.wait_for(self.rag_provider.retrieve(query), timeout=0.150)
+                if retrieval_res.has_verified_info:
+                    verified_context = "\n".join(f"- [{item.title}]: {item.content}" for item in retrieval_res.items)
+            except asyncio.TimeoutError:
+                logger.info(
+                    "[RAG] Retrieve timed out after 150ms; continuing LLM without verified context",
+                    extra={"session_id": session.session_id}
+                )
+            except Exception as e:
+                logger.debug(f"[RAG] Retrieve notice: {e}")
 
-        # 3. Build system message
-        system_content = build_admission_system_prompt(
-            institution_name=session.institution_name,
-            agent_name="Priya",
-            language_hint=active_lang,
-            preferred_language=active_lang,
-            verified_context=verified_context
+        # 3. Build system message using the active agent template
+        from app.templates.registry import AgentTemplateRegistry
+        template = AgentTemplateRegistry.get_template(getattr(session, "template_type", "education"))
+        system_content = template.get_system_prompt(
+            session=session,
+            verified_context=verified_context,
+            lang=active_lang
         )
 
         messages = [{"role": "system", "content": system_content}]

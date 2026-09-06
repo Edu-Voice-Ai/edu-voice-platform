@@ -56,7 +56,7 @@ llm:
 tts:
   provider: "sarvam"
   model: "bulbul:v3"
-  speaker: "priya"
+  speaker: "pooja"
   pace: 1.0
   chunking:
     min_chars: 60

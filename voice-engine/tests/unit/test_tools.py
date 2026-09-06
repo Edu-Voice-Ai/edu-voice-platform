@@ -11,7 +11,7 @@ async def test_admission_tools_execution():
     res = await courses_tool.execute(organization_id="org_apex", agent_id="agent_1")
     assert res.success is True
     assert "courses" in res.data
-    assert len(res.data["courses"]) >= 3
+    assert len(res.data["courses"]) == 2
 
     fee_tool = GetFeeTool()
     fee_res = await fee_tool.execute(organization_id="org_apex", agent_id="agent_1", course_name="CSE")

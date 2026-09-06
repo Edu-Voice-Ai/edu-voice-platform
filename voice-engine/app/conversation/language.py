@@ -24,14 +24,14 @@ LANGUAGE_STYLE_MAPPING = {
     "en-IN": "indian_english"
 }
 
-# Two-Minute Consent Prompts & Responses
-CONSENT_REQUEST_PROMPT = {
-    "te-IN": "సరే, ఇక నుంచి మనం తెలుగులో మాట్లాడుకుందాం. మీతో రెండు నిమిషాలు మాట్లాడవచ్చా?",
-    "hi-IN": "ठीक है, अब हम हिंदी में बात करेंगे। क्या मैं आपसे दो मिनट बात कर सकता हूँ?",
-    "en-IN": "Sure, we can continue in English. May I speak with you for two minutes?"
+# Direct Language Selection Acknowledgments (Zero Two-Minute Consent)
+LANGUAGE_SELECTION_ACKNOWLEDGMENT = {
+    "te-IN": "సరే, తెలుగులో మాట్లాడుకుందాం. మీకు ఏ వివరాలు కావాలి?",
+    "hi-IN": "ज़रूर, Hindi में बात करते हैं। बताइए आपको क्या details चाहिए?",
+    "en-IN": "Sure, continuing in English. How can I help you today?"
 }
 
-INITIAL_ACKNOWLEDGMENT = CONSENT_REQUEST_PROMPT
+INITIAL_ACKNOWLEDGMENT = LANGUAGE_SELECTION_ACKNOWLEDGMENT
 
 CONSENT_YES_RESPONSE = {
     "te-IN": "ధన్యవాదాలు. మీకు ఏ course గురించి తెలుసుకోవాలి?",
@@ -261,31 +261,89 @@ class LanguagePreferenceParser:
     def detect_language_switch(cls, text: str) -> Optional[str]:
         """
         Detects if the user is explicitly requesting to switch languages during the call.
-        Returns the new language code (e.g. 'en-IN', 'hi-IN', 'te-IN') or None if not switching.
+        Requires explicit language-switch intent (e.g. 'Speak Telugu', 'తెలుగులో మాట్లాడండి',
+        'Hindi mein boliye', 'Switch to English').
+        Does NOT trigger on normal domain queries that happen to contain script or domain terms
+        like 'Telugu engineering courses' or 'మీ దగ్గర CSE ఉందా?'.
+        Returns the new language code ('en-IN', 'hi-IN', 'te-IN') or None.
         """
         if not text:
             return None
 
-        normalized = text.lower().strip()
+        clean = text.lower().strip()
 
-        # 1. Telugu switch (any mention of Telugu or script)
-        telugu_switch = [
-            "తెలుగు", "telugu", "telgu", "telug", "telg", "pelugu", "talugu",
-            "payu", "tell you", "tellu", "telu", "మాట్లాడతాను", "మాట్లాడండి"
+        # 1. Explicit English switch requests
+        english_phrases = [
+            r"\bswitch\s*to\s*english\b",
+            r"\b(speak|talk)\s*(in\s*)?english\b",
+            r"\b(i\s*want|prefer|need)\s*english\b",
+            r"\benglish\s*(lo|me|mein|please)?\s*(cheppandi|boliye|baat\s*kijiye)\b",
+            r"\b(in\s*)?english\s*(please|lo)\b",
+            r"\bin\s*english\b",
+            r"^\s*(english|inglish)\s*[.?!]?$",
+            r"(ఇంగ్లీష్|ఇంగ్లీషు|इंग्लिश)\s*(లో|में)?\s*(చెప్పండి|మాట్లాడండి|बोलिए|बताइए)?",
+            r"^\s*(ఇంగ్లీష్|ఇంగ్లీషు|इंग्लिश)\s*[.?!]?$"
         ]
-        if any(0x0C00 <= ord(c) <= 0x0C7F for c in text) or any(k in normalized for k in telugu_switch):
-            return "te-IN"
-
-        # 2. Hindi switch
-        hindi_switch = ["hindi", "hind", "hndi", "हिंदी", "हिन्दी", "बात करो", "बात करें"]
-        if any(0x0900 <= ord(c) <= 0x097F for c in text) or any(k in normalized for k in hindi_switch):
-            return "hi-IN"
-
-        # 3. English switch
-        if any(k in normalized for k in ["english", "eng", "in english", "ఇంగ్లీష్", "ఇంగ్లీషు", "इंग्लिश"]):
+        if any(re.search(p, clean, re.IGNORECASE) for p in english_phrases):
             return "en-IN"
 
+        # 2. Explicit Hindi switch requests
+        hindi_phrases = [
+            r"\bswitch\s*to\s*hindi\b",
+            r"\b(speak|talk)\s*(in\s*)?hindi\b",
+            r"\b(i\s*want|prefer|need)\s*hindi\b",
+            r"\bhindi\s*(me|mein|lo|please)?\s*(baat\s*(kijiye|karo|karna)|boliye|batao|cheppandi)\b",
+            r"\bhindi\s*(me|mein)\b",
+            r"\b(in\s*)?hindi\s*please\b",
+            r"^\s*(hindi|hndi|hind)\s*[.?!]?$",
+            r"^\s*(हिंदी|हिन्दी)\s*[.?!]?$",
+            r"^\s*(హిందీ)\s*[.?!]?$",
+            r"(अब\s*)?(हिंदी|हिन्दी)\s*(में)?\s*(बोलिए|बात\s*(करें|करो|कीजिए)|बताइए)",
+            r"(ఇక\s*)?(హిందీ|హిందీలో)\s*(లో|మే|మెయిన్)?\s*(మాట్లాడండి|చెప్పండి|బోలియే|బాత్\s*కీజియే)?"
+        ]
+        if any(re.search(p, clean, re.IGNORECASE) for p in hindi_phrases):
+            return "hi-IN"
+
+        # 3. Explicit Telugu switch requests
+        telugu_phrases = [
+            r"\bswitch\s*to\s*telugu\b",
+            r"\b(speak|talk)\s*(in\s*)?telugu\b",
+            r"\b(i\s*want|prefer|need)\s*telugu\b",
+            r"\btelugu\s*(lo|me|mein|please)?\s*(matladandi|cheppandi|boliye)\b",
+            r"\btelugu\s*lo\b",
+            r"\b(in\s*)?telugu\s*please\b",
+            r"^\s*(telugu|telgu|telug|telg)\s*[.?!]?$",
+            r"^\s*(తెలుగు)\s*[.?!]?$",
+            r"^\s*(तेलुगु|तेलगू|तेलुगू)\s*[.?!]?$",
+            r"(ఇక\s*)?తెలుగులో\s*(మాట్లాడండి|మాట్లాడతాను|చెప్పండి)",
+            r"(నాకు\s*)?తెలుగులో\s*మాట్లాడాలి",
+            r"(अब\s*)?(तेलुगु|तेलगू|तेलुगू)\s*(में)?\s*(बोलिए|बात\s*(करें|करो|कीजिए)|बताइए)?"
+        ]
+        if any(re.search(p, clean, re.IGNORECASE) for p in telugu_phrases):
+            return "te-IN"
+
         return None
+
+    @classmethod
+    def strip_language_switch_phrases(cls, text: str) -> str:
+        """
+        Removes language switch command prefixes from the query text.
+        Example: 'Switch to Hindi, what is the CSE fee?' -> 'what is the CSE fee?'
+        """
+        if not text:
+            return ""
+
+        patterns = [
+            r"^(please\s*)?switch\s*to\s*(hindi|telugu|english)\s*[,.-]?\s*",
+            r"^(please\s*)?(speak|talk)\s*(in\s*)?(hindi|telugu|english)\s*[,.-]?\s*",
+            r"^(hindi|telugu|english)\s*(me|mein|lo|please)?\s*(boliye|matladandi|cheppandi|baat\s*kijiye)?\s*[,.-]?\s*",
+            r"^(हिंदी\s*में\s*बोलिए|తెలుగులో\s*మాట్లాడండి|హిందీలో\s*మాట్లాడండి|హిందీ\s*మే\s*బోలియే|तेलुगु\s*में\s*बोलिए|ఇంగ్లీష్\s*లో\s*మాట్లాడండి)\s*[,.-]?\s*",
+            r"^(nahi|లేదు|नहीं)\s*[,.-]?\s*"
+        ]
+        stripped = text.strip()
+        for pat in patterns:
+            stripped = re.sub(pat, "", stripped, flags=re.IGNORECASE).strip()
+        return stripped if stripped else text.strip()
 
 
 def normalize_multilingual_text(text: str) -> str:

@@ -75,3 +75,14 @@ def configure_logging(level: str = "INFO", json_format: bool = False):
 def get_logger(name: str) -> logging.Logger:
     """Obtain a logger instance by name."""
     return logging.getLogger(name)
+
+
+def mask_phone_number(number: Optional[str]) -> str:
+    """Mask phone number for privacy compliant logging."""
+    if not number:
+        return "UNKNOWN"
+    num_str = str(number).strip()
+    if len(num_str) <= 4:
+        return "****"
+    return "*" * (len(num_str) - 4) + num_str[-4:]
+

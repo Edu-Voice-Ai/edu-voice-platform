@@ -20,7 +20,7 @@ class TTSProvider(Protocol):
         self,
         text_stream: AsyncIterator[str],
         language_code: str = "te-IN",
-        speaker: str = "priya",
+        speaker: str = "pooja",
         cancellation_token: Optional[CancellationToken] = None
     ) -> AsyncIterator[TTSAudioChunk]:
         """Synthesize incoming text stream into streaming PCM audio frames."""
@@ -30,7 +30,7 @@ class TTSProvider(Protocol):
         self,
         text: str,
         language_code: str = "te-IN",
-        speaker: str = "priya"
+        speaker: str = "pooja"
     ) -> bytes:
         """Synthesize full text to raw PCM16 bytes."""
         ...

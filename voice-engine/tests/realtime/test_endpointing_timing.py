@@ -205,3 +205,23 @@ def test_adaptive_endpointing_structured_numeric_input_retains_2000ms():
     assert res == "SPEECH_ENDED"
     assert session.current_turn.state == TurnStateEnum.PROCESSING
 
+
+def test_post_barge_in_endpoint_is_400ms():
+    """After barge-in, conversational endpointing uses ~400ms silence, not 800ms."""
+    session = SessionState(session_id="test_sess_post_barge_ep", organization_id="org1", agent_id="agent1")
+    session.language_selection_complete = True
+    queues = PipelineQueueBundle()
+    tm = TurnManager(session=session, queues=queues, min_barge_in_duration_ms=80)
+    session.current_turn.state = TurnStateEnum.SPEAKING
+    session.is_bot_speaking = True
+    for _ in range(3):
+        tm.handle_speech_frame(is_speech=True, frame_duration_ms=20)
+    assert tm.handle_speech_frame(is_speech=True, frame_duration_ms=20) == "BARGE_IN"
+    assert tm.effective_silence_duration_ms == 400.0
+    for _ in range(10):
+        tm.handle_speech_frame(is_speech=True, frame_duration_ms=20)
+    for _ in range(19):
+        r = tm.handle_speech_frame(is_speech=False, frame_duration_ms=20)
+        assert r is None
+    assert tm.handle_speech_frame(is_speech=False, frame_duration_ms=20) == "SPEECH_ENDED"
+

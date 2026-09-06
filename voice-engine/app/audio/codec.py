@@ -54,7 +54,7 @@ class AudioCodec:
 
     @staticmethod
     def resample_linear(pcm_data: bytes, orig_sr: int, target_sr: int) -> bytes:
-        """Linear interpolation resampling for PCM16 audio."""
+        """Continuous linear interpolation / decimation resampling for PCM16 audio."""
         if orig_sr == target_sr:
             return pcm_data
         
@@ -65,8 +65,18 @@ class AudioCodec:
         if num_orig == 0 or num_target == 0:
             return b""
             
-        orig_indices = np.linspace(0, num_orig - 1, num_orig)
-        target_indices = np.linspace(0, num_orig - 1, num_target)
+        # Fast, exact, continuous 2:1 anti-aliasing decimation (16000 Hz -> 8000 Hz)
+        # Prevents 50Hz frame-boundary phase distortion across 20ms telephony frames
+        if orig_sr == 16000 and target_sr == 8000:
+            if num_orig % 2 != 0:
+                audio = audio[:num_orig - 1]
+            resampled = ((audio[0::2].astype(np.int32) + audio[1::2].astype(np.int32)) // 2).astype(np.int16)
+            return resampled.tobytes()
+
+        # Continuous time-grid mapping (preserves true sampling step without endpoint phase stretching)
+        step = orig_sr / target_sr
+        target_indices = np.arange(num_target, dtype=np.float64) * step
+        orig_indices = np.arange(num_orig, dtype=np.float64)
         resampled = np.interp(target_indices, orig_indices, audio).astype(np.int16)
         return resampled.tobytes()
 

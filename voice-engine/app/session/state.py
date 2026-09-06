@@ -6,6 +6,7 @@ import time
 from app.core.ids import generate_turn_id, generate_generation_id
 from app.pipeline.cancellation import CancellationToken
 from app.core.logging import get_logger
+from app.audio.speaker_lock import AdaptiveSpeakerVoiceProfiler
 
 logger = get_logger("session.state")
 
@@ -20,6 +21,20 @@ class TurnStateEnum(str, Enum):
     INTERRUPTING = "INTERRUPTING"
     LISTENING_AFTER_BARGE_IN = "LISTENING_AFTER_BARGE_IN"
     INTERRUPTED = "INTERRUPTED"
+
+
+class GenerationLifecycleState(str, Enum):
+    ACTIVE = "ACTIVE"
+    CANCELLING = "CANCELLING"
+    CANCELLED = "CANCELLED"
+    COMPLETED = "COMPLETED"
+
+
+class ConversationFloor(str, Enum):
+    IDLE = "IDLE"
+    USER_SPEAKING = "USER_SPEAKING"
+    AI_SPEAKING = "AI_SPEAKING"
+    PROCESSING = "PROCESSING"
 
 
 class GreetingStateEnum(str, Enum):
@@ -41,6 +56,7 @@ class EphemeralTurnState:
     generated_text: str = ""
     tts_audio_chunks_count: int = 0
     barge_in_handled: bool = False
+    is_post_barge_in: bool = False
 
     def cancel(self, reason: str = "Interrupted by user"):
         """Cancel this turn and transition state."""
@@ -55,14 +71,55 @@ class SessionState:
     organization_id: str
     agent_id: str
     call_id: Optional[str] = None
+    call_direction: str = "inbound"
+    campaign_id: Optional[str] = None
+    contact_id: Optional[str] = None
     language: str = "en-IN"
     preferred_language: Optional[str] = None
     language_selection_complete: bool = False
     institution_name: str = "Apex University"
+    business_name: str = "Apex University"
+    template_type: str = "education"
+    agent_name: Optional[str] = None
+    agent_config: Optional[Any] = None
+    system_prompt: Optional[str] = None
+    greeting_message: Optional[str] = None
+    goodbye_message: Optional[str] = None
     client_sample_rate: int = 16000
     created_at_ms: float = field(default_factory=lambda: time.time() * 1000)
     is_active: bool = True
     user_has_floor: bool = False
+
+    def __post_init__(self):
+        if self.business_name != "Apex University" and self.institution_name == "Apex University":
+            self.institution_name = self.business_name
+        elif self.institution_name != "Apex University" and self.business_name == "Apex University":
+            self.business_name = self.institution_name
+
+    def get_greeting_text(self) -> str:
+        """Resolve greeting text using the active agent template or configuration."""
+        if self.greeting_message:
+            return self.greeting_message
+        try:
+            from app.templates.registry import AgentTemplateRegistry
+            template = AgentTemplateRegistry.get_template(self.template_type)
+            active_lang = self.preferred_language or self.language or "en-IN"
+            return template.get_greeting(self, lang=active_lang)
+        except Exception:
+            return f"Welcome to {self.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+
+    def get_goodbye_text(self) -> str:
+        """Resolve goodbye text using the active agent template or configuration."""
+        if self.goodbye_message:
+            return self.goodbye_message
+        try:
+            from app.templates.registry import AgentTemplateRegistry
+            template = AgentTemplateRegistry.get_template(self.template_type)
+            active_lang = self.preferred_language or self.language or "en-IN"
+            return template.get_goodbye(self, lang=active_lang)
+        except Exception:
+            return f"Thank you for reaching out to {self.business_name}. Have a wonderful day!"
+
     
     # Conversation History (List of dicts: {"role": "user"|"assistant"|"system"|"tool", "content": ...})
     messages: List[Dict[str, Any]] = field(default_factory=list)
@@ -79,10 +136,16 @@ class SessionState:
     two_minute_permission_asked: bool = False
     consent_clarification_asked: bool = False
     consent_granted: Optional[bool] = None
+    consecutive_empty_turns: int = 0
     is_greeting_playing: bool = False
     greeting_state: GreetingStateEnum = GreetingStateEnum.NOT_STARTED
+    generation_states: Dict[str, GenerationLifecycleState] = field(default_factory=dict)
     cancelled_generation_ids: set[str] = field(default_factory=set)
     all_generation_ids: set[str] = field(default_factory=set)
+    cancellation_cycle_id: int = 0
+    barge_in_timestamp_ms: float = 0.0
+    last_clear_timestamp_ms: float = 0.0
+    last_old_audio_send_timestamp_ms: float = 0.0
 
     # Structured Input & Numeric Buffering State
     structured_input_mode: str = "NORMAL"
@@ -93,27 +156,175 @@ class SessionState:
     current_turn: EphemeralTurnState = field(default_factory=EphemeralTurnState)
     previous_turn_id: Optional[str] = None
     previous_generation_id: Optional[str] = None
+    active_playback_generation_id: Optional[str] = None
+    active_playback_turn_id: Optional[str] = None
+    active_playback_language: Optional[str] = None
+    is_bot_speaking: bool = False
     last_response_text: Optional[str] = None
     turn_count: int = 0
+    # Cost & Delivery Telemetry
+    tts_requests_count: int = 0
+    tts_chars_count: int = 0
+    tts_pcm_bytes: int = 0
+    tts_dedup_hits: int = 0
+    tts_cancelled_count: int = 0
+    tts_not_played_count: int = 0
+    tts_retries_count: int = 0
+    tts_after_disconnect_count: int = 0
+    tts_after_barge_in_count: int = 0
+    is_disconnected: bool = False
     playback_estimated_end_time_ms: float = 0.0
+
+    # Adaptive Speaker Voice Profiler — locks onto primary caller's vocal identity on Turn 1
+    speaker_profiler: AdaptiveSpeakerVoiceProfiler = field(default_factory=AdaptiveSpeakerVoiceProfiler)
+
+    def log_cost_summary(self) -> str:
+        """Format and return structured VOICE COST SUMMARY for call telemetry."""
+        avg_chars = int(self.tts_chars_count / max(self.tts_requests_count, 1))
+        summary = (
+            f"\n=============================\n"
+            f"VOICE COST SUMMARY\n"
+            f"=============================\n"
+            f"turns={self.turn_count}\n"
+            f"tts_requests={self.tts_requests_count}\n"
+            f"tts_chars={self.tts_chars_count}\n"
+            f"tts_avg_chars={avg_chars}\n"
+            f"tts_duplicates={self.tts_dedup_hits}\n"
+            f"tts_cancelled={self.tts_cancelled_count}\n"
+            f"tts_not_played={self.tts_not_played_count}\n"
+            f"tts_retries={self.tts_retries_count}\n"
+            f"tts_after_disconnect={self.tts_after_disconnect_count}\n"
+            f"tts_after_barge_in={self.tts_after_barge_in_count}\n"
+            f"============================="
+        )
+        return summary
+
+    def extend_playback_deadline(self, duration_ms: float = 20.0):
+        """Accumulate remaining physical playback time even when frames are queued faster than realtime."""
+        now_ms = time.time() * 1000
+        base = max(float(self.playback_estimated_end_time_ms or 0.0), now_ms)
+        self.playback_estimated_end_time_ms = base + duration_ms
+
+    def mark_playback_finished(self, force: bool = False):
+        """Clear greeting/TTS playback flags when physical playout is done (or forced after telephony pacing)."""
+        now_ms = time.time() * 1000
+        self.is_greeting_playing = False
+        self.active_playback_generation_id = None
+        self.active_playback_turn_id = None
+        self.active_playback_language = None
+        if force or now_ms >= float(self.playback_estimated_end_time_ms or 0.0):
+            self.is_bot_speaking = False
+            self.playback_estimated_end_time_ms = 0.0
+            self.user_has_floor = True
+            if hasattr(self, "conversation_state"):
+                self.conversation_state = "LISTENING"
+            if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.IDLE):
+                self.current_turn.state = TurnStateEnum.LISTENING
+
+    def signal_playback_interrupt(self):
+        """Wake the transport writer immediately so it can interrupt playback instead of finishing a pacing sleep."""
+        import asyncio
+        ev = getattr(self, "_playback_interrupt_event", None)
+        if ev is None:
+            ev = asyncio.Event()
+            self._playback_interrupt_event = ev
+        ev.set()
+
+    def arm_playback_interrupt(self):
+        """Reset the writer interrupt event at the start of a new TTS/greeting playout."""
+        import asyncio
+        ev = getattr(self, "_playback_interrupt_event", None)
+        if ev is None:
+            self._playback_interrupt_event = asyncio.Event()
+        else:
+            ev.clear()
+
+    def playback_interrupt_event(self):
+        return getattr(self, "_playback_interrupt_event", None)
+
+    def set_generation_state(self, gen_id: str, state: GenerationLifecycleState):
+        """Set generation lifecycle state with irreversibility for CANCELLED state."""
+        current = self.generation_states.get(gen_id)
+        if current == GenerationLifecycleState.CANCELLED:
+            # Irreversible invariant: Once CANCELLED, a generation can NEVER return to ACTIVE or COMPLETED
+            return
+        self.generation_states[gen_id] = state
+        if state == GenerationLifecycleState.CANCELLED:
+            self.cancelled_generation_ids.add(gen_id)
+
+    def get_generation_state(self, gen_id: Optional[str]) -> GenerationLifecycleState:
+        """Get lifecycle state for a generation."""
+        if not gen_id:
+            return GenerationLifecycleState.CANCELLED
+        if gen_id in self.cancelled_generation_ids:
+            return GenerationLifecycleState.CANCELLED
+        return self.generation_states.get(gen_id, GenerationLifecycleState.ACTIVE)
+
+    @property
+    def floor(self) -> ConversationFloor:
+        """Authoritative single source of truth for who owns the audio floor."""
+        if self.current_turn and self.current_turn.state in (TurnStateEnum.LISTENING, TurnStateEnum.LISTENING_AFTER_BARGE_IN):
+            return ConversationFloor.USER_SPEAKING
+        if getattr(self, "is_greeting_playing", False):
+            return ConversationFloor.AI_SPEAKING
+        if self.current_turn and self.current_turn.state == TurnStateEnum.SPEAKING:
+            return ConversationFloor.AI_SPEAKING
+        now_ms = time.time() * 1000
+        if getattr(self, "is_bot_speaking", False) or (getattr(self, "active_playback_generation_id", None) and now_ms < self.playback_estimated_end_time_ms):
+            return ConversationFloor.AI_SPEAKING
+        if self.current_turn and self.current_turn.state == TurnStateEnum.PROCESSING:
+            return ConversationFloor.PROCESSING
+        return ConversationFloor.IDLE
 
     @property
     def is_assistant_speaking(self) -> bool:
-        """Returns True if the assistant is actively speaking or audio is physically playing out on telephony buffer."""
-        if getattr(self, "is_greeting_playing", False):
-            return True
-        if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.PROCESSING):
-            return True
-        if self.current_turn and self.current_turn.state == TurnStateEnum.LISTENING_AFTER_BARGE_IN:
-            return False
+        """Returns True if the assistant is actively speaking, generating, or audio is physically playing out on telephony buffer."""
         now_ms = time.time() * 1000
-        return now_ms < self.playback_estimated_end_time_ms
+        estimated_end = float(getattr(self, "playback_estimated_end_time_ms", 0.0) or 0.0)
+        return (
+            bool(getattr(self, "is_bot_speaking", False))
+            or bool(getattr(self, "is_greeting_playing", False))
+            or (now_ms < estimated_end)
+            or bool(getattr(self, "active_playback_generation_id", None))
+        )
+
+    def invalidate_active_generation(self, reason: str = "Interruption"):
+        """Atomically invalidate active playback generation, record barge-in cutoff, and advance cancellation cycle."""
+        now_ms = time.time() * 1000
+        self.cancellation_cycle_id += 1
+        self.barge_in_timestamp_ms = now_ms
+
+        target_gids = set()
+        if self.active_playback_generation_id:
+            target_gids.add(self.active_playback_generation_id)
+        if self.current_turn and self.current_turn.generation_id:
+            target_gids.add(self.current_turn.generation_id)
+        if self.previous_generation_id:
+            target_gids.add(self.previous_generation_id)
+        if hasattr(self, "all_generation_ids"):
+            target_gids.update(self.all_generation_ids)
+
+        for gid in target_gids:
+            if gid:
+                self.cancelled_generation_ids.add(gid)
+                self.generation_states[gid] = GenerationLifecycleState.CANCELLED
+
+        self.active_playback_generation_id = None
+        self.active_playback_turn_id = None
+        self.active_playback_language = None
+        self.playback_estimated_end_time_ms = 0.0
+        self.is_greeting_playing = False
+        self.is_bot_speaking = False
+        self.user_has_floor = True
+        self.signal_playback_interrupt()
 
     def is_generation_cancelled(self, gen_id: Optional[str]) -> bool:
         """Check if a generation ID has been invalidated via barge-in."""
         if not gen_id:
             return False
-        return gen_id in self.cancelled_generation_ids
+        if gen_id in self.cancelled_generation_ids:
+            return True
+        return self.generation_states.get(gen_id) == GenerationLifecycleState.CANCELLED
 
     @property
     def conversation_style(self) -> str:
@@ -142,6 +353,7 @@ class SessionState:
         new_turn = EphemeralTurnState()
         new_turn.state = TurnStateEnum.LISTENING
         self.all_generation_ids.add(new_turn.generation_id)
+        self.generation_states[new_turn.generation_id] = GenerationLifecycleState.ACTIVE
         self.current_turn = new_turn
         self.turn_count += 1
 
@@ -156,8 +368,10 @@ class SessionState:
         msg = {"role": role, "content": content, "timestamp": time.time(), **kwargs}
         self.messages.append(msg)
 
-    def close(self):
-        """Close session and cancel active turn."""
+    def close(self, reason: str = "Session closed"):
+        """Close session and cancel active turn and generations."""
         self.is_active = False
+        self.is_disconnected = True
+        self.invalidate_active_generation(reason=reason)
         if self.current_turn:
-            self.current_turn.cancel("Session closed")
+            self.current_turn.cancel(reason)

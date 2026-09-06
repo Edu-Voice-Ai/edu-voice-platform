@@ -161,3 +161,39 @@ async def test_prompt_assembly_with_cross_lingual_rag():
     assert "VERIFIED INSTITUTIONAL KNOWLEDGE" in sys_en
     assert "BTech Computer Science and Engineering (CSE)" in sys_en
     assert "BTech Electronics and Communication (ECE)" in sys_en
+
+
+@pytest.mark.asyncio
+async def test_unoffered_courses_rejection_and_counselor_offer():
+    """Verify that asking about MBA, MBBS, Law, etc. immediately returns the clear 1-sentence refusal with counselor offer."""
+    from app.conversation.router import FastQueryRouter, QueryComplexity
+
+    rag = MockRAGProvider()
+
+    # English MBA check
+    s_en = SessionState(session_id="s_en", organization_id="org_apex_univ", agent_id="agent_admission", preferred_language="en-IN")
+    comp_en, resp_en = await FastQueryRouter.route_and_resolve_fast_path(s_en, "Do you have MBA course?", rag)
+    assert comp_en == QueryComplexity.SIMPLE
+    assert resp_en == "We do not offer MBA right now; we currently offer B.Tech in CSE and ECE. Would you like me to connect you with a human counselor?"
+
+    # Telugu MBA check
+    s_te = SessionState(session_id="s_te", organization_id="org_apex_univ", agent_id="agent_admission", preferred_language="te-IN")
+    comp_te, resp_te = await FastQueryRouter.route_and_resolve_fast_path(s_te, "మీ కాలేజీలో MBA కోర్స్ ఉందా?", rag)
+    assert comp_te == QueryComplexity.SIMPLE
+    assert resp_te == "మా దగ్గర ప్రస్తుతం MBA కోర్స్ లేదు, కేవలం B.Tech CSE మరియు ECE మాత్రమే ఉన్నాయి. మీరు కౌన్సెలర్ తో మాట్లాడాలనుకుంటున్నారా?"
+
+    # Hindi MBA check
+    s_hi = SessionState(session_id="s_hi", organization_id="org_apex_univ", agent_id="agent_admission", preferred_language="hi-IN")
+    comp_hi, resp_hi = await FastQueryRouter.route_and_resolve_fast_path(s_hi, "क्या आपके पास MBA कोर्स है?", rag)
+    assert comp_hi == QueryComplexity.SIMPLE
+    assert resp_hi == "हमारे पास अभी MBA कोर्स नहीं है, हम केवल B.Tech CSE और ECE प्रदान करते हैं। क्या आप काउंसलर से बात करना चाहेंगे?"
+
+    # English MBBS check
+    comp_mbbs, resp_mbbs = await FastQueryRouter.route_and_resolve_fast_path(s_en, "Can I apply for MBBS here?", rag)
+    assert comp_mbbs == QueryComplexity.SIMPLE
+    assert resp_mbbs == "We do not offer MBBS right now; we currently offer B.Tech in CSE and ECE. Would you like me to connect you with a human counselor?"
+
+    # English Law check
+    comp_law, resp_law = await FastQueryRouter.route_and_resolve_fast_path(s_en, "What is the fee for Law?", rag)
+    assert comp_law == QueryComplexity.SIMPLE
+    assert resp_law == "We do not offer Law right now; we currently offer B.Tech in CSE and ECE. Would you like me to connect you with a human counselor?"

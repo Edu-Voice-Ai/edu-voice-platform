@@ -15,6 +15,12 @@ from app.core.logging import get_logger
 
 logger = get_logger("tts.sarvam")
 
+# ── Voice Consistency Lock ─────────────────────────────────────────────────
+# "pooja" is the authoritative warm female counselor voice in Bulbul:v3
+# supported across en-IN, te-IN, hi-IN.  This constant OVERRIDES any caller-
+# supplied speaker kwarg to prevent accidental voice switching between turns.
+LOCKED_SPEAKER: str = "pooja"
+
 
 class SarvamTTSProvider(TTSProvider):
     """Sarvam Bulbul REST & Streaming Text-to-Speech Provider with Overlapped Pipeline Prefetch."""
@@ -23,7 +29,7 @@ class SarvamTTSProvider(TTSProvider):
         self,
         api_key: Optional[str] = None,
         model: str = "bulbul:v3",
-        default_speaker: str = "priya",
+        default_speaker: str = "pooja",
         base_url: str = "https://api.sarvam.ai",
         min_chars: int = 35,
         max_chars: int = 200
@@ -37,15 +43,41 @@ class SarvamTTSProvider(TTSProvider):
         self._client: Optional[httpx.AsyncClient] = None
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
+        if self._client is None or getattr(self._client, "is_closed", False):
+            try:
+                import h2
+                has_h2 = True
+            except ImportError:
+                has_h2 = False
+
             self._client = httpx.AsyncClient(
                 timeout=25.0,
-                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+                http2=has_h2,
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=120.0)
             )
         return self._client
 
+    async def prewarm(self) -> bool:
+        """Establish underlying TCP/TLS/HTTP-2 socket connection and warm TTS endpoint with 1-char dummy synthesis."""
+        if not self.api_key:
+            return False
+        try:
+            client = self._get_client()
+            # 1. Warm connection pool
+            await client.request("HEAD", f"{self.base_url}/", timeout=3.0)
+            # 2. Warm TTS generation endpoint with single character to cut first-turn latency
+            try:
+                await self.synthesize_text(".", language_code="en-IN")
+            except Exception:
+                pass
+            logger.info("[TTS] Persistent HTTP/2 connection and model endpoint pre-warmed")
+            return True
+        except Exception as e:
+            logger.debug(f"[TTS] Prewarm notice: {e}")
+            return False
+
     async def close(self):
-        if self._client and not self._client.is_closed:
+        if self._client and not getattr(self._client, "is_closed", False):
             await self._client.aclose()
 
     async def synthesize_text(
@@ -69,13 +101,28 @@ class SarvamTTSProvider(TTSProvider):
             "api-subscription-key": self.api_key,
             "Content-Type": "application/json"
         }
+        # Always enforce locked speaker — ignore any caller-supplied override
+        _speaker = LOCKED_SPEAKER
         payload = {
             "inputs": [clean_text],
             "target_language_code": language_code,
-            "speaker": speaker or self.default_speaker,
+            "speaker": _speaker,
             "model": self.model,
             "enable_preprocessing": True
         }
+
+        # Deduplication cache lookup
+        from app.tts.cache import TTSCacheManager
+        cached_pcm = TTSCacheManager.get(clean_text, language_code, _speaker)
+        if cached_pcm is not None:
+            logger.info(f"[TTS_CACHE] hit=True speaker={_speaker} language={language_code} chars={len(clean_text)}")
+            return cached_pcm
+        logger.info(f"[TTS_CACHE] hit=False speaker={_speaker} language={language_code} chars={len(clean_text)}")
+
+        logger.info(
+            f"[TTS_REQUEST] model={self.model} speaker={_speaker} language={language_code} "
+            f"char_count={len(clean_text)}"
+        )
 
         try:
             client = self._get_client()
@@ -98,13 +145,44 @@ class SarvamTTSProvider(TTSProvider):
             wav_bytes = base64.b64decode(wav_b64)
             pcm_data, sr, _, _ = AudioCodec.wav_bytes_to_pcm(wav_bytes)
             resampled = AudioCodec.resample_linear(pcm_data, sr, 16000)
+            clean_audio = self.trim_silence(resampled, pad_lead_ms=20, pad_trail_ms=30)
             logger.info(
-                f"[TTS] Synthesized {len(clean_text)} chars in {ttfb_ms:.1f}ms (pcm: {len(resampled)} bytes)",
+                f"[TTS] Synthesized {len(clean_text)} chars in {ttfb_ms:.1f}ms (pcm: {len(clean_audio)} bytes, trimmed from {len(resampled)})",
                 extra={"ttfb_ms": ttfb_ms, "chars": len(clean_text)}
             )
-            return resampled
+            # Store in deduplication cache
+            TTSCacheManager.put(clean_text, language_code, clean_audio, _speaker)
+            return clean_audio
         except httpx.RequestError as e:
             raise TTSError(f"Sarvam TTS network error: {e}", provider="sarvam")
+
+    @staticmethod
+    def trim_silence(pcm_bytes: bytes, pad_lead_ms: int = 20, pad_trail_ms: int = 30, thresh: int = 35) -> bytes:
+        """
+        Trims excessive synthetic silence padding from Sarvam Bulbul output.
+        Leaves pad_lead_ms before first speech sample and pad_trail_ms after last speech sample.
+        Ensures continuous, natural cadence without 500ms+ dead-air pauses between sentences.
+        """
+        if not pcm_bytes or len(pcm_bytes) < 320:
+            return pcm_bytes
+        import numpy as np
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+        nonzero = np.where(np.abs(samples) > thresh)[0]
+        if len(nonzero) == 0:
+            return pcm_bytes
+        sr = 16000
+        lead_samples = int(sr * (pad_lead_ms / 1000.0))
+        trail_samples = int(sr * (pad_trail_ms / 1000.0))
+        start_idx = max(0, nonzero[0] - lead_samples)
+        end_idx = min(len(samples), nonzero[-1] + 1 + trail_samples)
+        if (end_idx - start_idx) % 2 != 0:
+            if end_idx < len(samples):
+                end_idx += 1
+            elif start_idx > 0:
+                start_idx -= 1
+            else:
+                end_idx -= 1
+        return samples[start_idx:end_idx].tobytes()
 
     async def stream_synthesize(
         self,
@@ -119,7 +197,8 @@ class SarvamTTSProvider(TTSProvider):
         """
         chunker = AudioChunker(sample_rate=16000, frame_duration_ms=20)
         delimiters = {".", "!", "?", "।", "\n"}
-        active_speaker = speaker or self.default_speaker
+        # Always enforce locked speaker — caller-supplied speaker arg is ignored
+        active_speaker = LOCKED_SPEAKER
 
         # Bounded async queue for pending text chunks to synthesize
         segment_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=10)

@@ -35,6 +35,11 @@ class SpeechTextNormalizer:
         if not text:
             return text
 
+        # 0. Strip internal reasoning tags and markdown formatting
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        text = re.sub(r'[*_~`#>]', '', text)
+        text = re.sub(r'^\s*[-*•]\s+', '', text, flags=re.MULTILINE)
+
         # 1. Normalize numeric descriptors
         def _replace_descriptor(match: re.Match) -> str:
             num = match.group(1)
@@ -98,8 +103,18 @@ class SpeechTextNormalizer:
         """
         Extracts a safe linguistic chunk from the text buffer.
         NEVER splits inside a word, acronym, name, or course title.
-        When is_first_chunk is True, extracts the first natural opening clause (6-28 chars)
-        as early as possible to minimize time-to-first-audio.
+
+        When is_first_chunk is True, extraction rules for the FIRST chunk:
+          - Sentence-ending punctuation (.!?।): fires immediately when candidate >= 3 chars.
+            Reason: guarantees genuinely short complete responses ("Yes.", "Sure!", "OK.") are
+            dispatched to Sarvam in a single call without waiting for nonexistent additional text.
+          - Mid-sentence clause punctuation (,;:—): requires candidate >= 20 chars before
+            dispatching as first chunk.
+            Reason: prevents "Yes," (3 chars before comma) from firing as a standalone first
+            TTS request when the LLM is already streaming the continuation ("I can help you...").
+            Sarvam charges the same ~1,600 ms per API call regardless of input length, so
+            combining "Yes, I can help you" into one call eliminates a wasted round-trip.
+          - Word-boundary fallback: fires when buffer accumulates >= 20 chars with no punctuation.
         
         Returns:
             (extracted_chunk, remaining_buffer)
@@ -125,20 +140,25 @@ class SpeechTextNormalizer:
             end_pos = m.start() if is_connector else m.end()
             candidate = cls.normalize_for_speech(working_buffer[:end_pos].strip())
             delimiter = m.group(1) or m.group(2) or m.group(3)
-            min_boundary_len = 3 if is_first_chunk else (min(min_chars, 6) if delimiter in ".!?।\n" else min_chars)
-            
-            # If is_first_chunk and a natural delimiter was found before 40 chars, extract immediately
+
             if is_first_chunk:
-                if len(candidate) >= min_boundary_len and len(candidate) <= 40 and cls.is_safe_chunk_boundary(candidate):
+                # Sentence-ending punctuation: fire on complete sentences up to 50 chars.
+                # e.g. "Sure, I can help with admissions." (34 chars) -> ONE clean first chunk!
+                is_sentence_end = delimiter in ".!?।\n"
+                first_chunk_min = 3 if is_sentence_end else 20
+                first_chunk_max = 50 if is_sentence_end else 40
+                if len(candidate) >= first_chunk_min and len(candidate) <= first_chunk_max and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
             else:
+                # Non-first chunks: require at least min_chars (or full sentence end)
+                min_boundary_len = min(min_chars, 20) if delimiter in ".!?।\n" else min_chars
                 if len(candidate) >= min_boundary_len and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
 
-        # 1b. For the very first chunk without early punctuation, if buffer reaches 28-35 chars, emit at word boundary
-        if is_first_chunk and len(working_buffer) >= 28:
+        # 1b. Fallback: if buffer reaches 20+ chars without early punctuation, emit at word boundary (<= 35 chars)
+        if is_first_chunk and len(working_buffer) >= 20:
             first_slice = working_buffer[:35]
             space_matches = list(re.finditer(r'\s+', first_slice))
             if space_matches:

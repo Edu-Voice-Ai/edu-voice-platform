@@ -6,7 +6,7 @@ from app.audio.frames import AudioFrame
 from app.stt.base import STTChunk
 from app.llm.base import LLMChunk
 from app.tts.base import TTSAudioChunk
-from app.session.events import SessionEvent
+from app.session.events import SessionEvent, EventType
 
 
 @dataclass
@@ -43,9 +43,25 @@ class PipelineQueueBundle:
             except Exception:
                 break
 
-        # Drain event_out_queue to immediately drop stale AUDIO_OUTPUT frames
+        # Drain event_out_queue of audio frames but preserve control events
+        retained_events = []
         while not self.event_out_queue.empty():
             try:
-                self.event_out_queue.get_nowait()
+                ev = self.event_out_queue.get_nowait()
+                # Keep critical cancellation and control events
+                if ev.event in (
+                    EventType.RESPONSE_CANCELLED,
+                    EventType.AUDIO_FLUSH,
+                    EventType.AUDIO_PLAYBACK_STOP,
+                    "response.cancelled",
+                    "audio.flush",
+                    "audio.playback.stop"
+                ):
+                    retained_events.append(ev)
+            except Exception:
+                break
+        for ev in retained_events:
+            try:
+                self.event_out_queue.put_nowait(ev)
             except Exception:
                 break

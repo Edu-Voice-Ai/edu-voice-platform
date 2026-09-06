@@ -4,7 +4,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.health import router as health_router
 from app.api.websocket import router as ws_router
-from app.api.exotel import router as exotel_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
@@ -16,10 +15,26 @@ logger = get_logger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown hooks."""
+    import asyncio
     logger.info("Initializing Edu-Voice-AI Realtime Voice Engine...")
     logger.info(
         f"[CONFIG] STT model: {settings.stt_model} | LLM model: {settings.llm_model} | TTS model: {settings.tts_model} | Supported languages: {', '.join(settings.supported_languages)}"
     )
+    # Initialize TTS deduplication cache
+    from app.tts.cache import TTSCacheManager
+    TTSCacheManager.initialize()
+
+    # Optional background warm-up of FastRouter TTS cache (default disabled to prevent cost explosion)
+    if settings.enable_startup_tts_precache:
+        try:
+            from app.tts.sarvam import SarvamTTSProvider
+            from app.pipeline.engine import SpeechToSpeechEngine
+            tts = SarvamTTSProvider(api_key=settings.sarvam_api_key, model=settings.tts_model, default_speaker=settings.tts_speaker)
+            asyncio.create_task(SpeechToSpeechEngine.warmup_fast_query_cache(tts))
+        except Exception as e:
+            logger.warning(f"Failed to trigger FastRouter TTS pre-caching: {e}")
+    else:
+        logger.info("[FAST_CACHE] Startup live API TTS pre-caching is disabled (on-demand caching enabled)")
     yield
     logger.info("Shutting down Edu-Voice-AI Realtime Voice Engine...")
 
@@ -43,7 +58,7 @@ app.add_middleware(
 # Attach routers
 app.include_router(health_router)
 app.include_router(ws_router)
-app.include_router(exotel_router)
+
 
 
 if __name__ == "__main__":
