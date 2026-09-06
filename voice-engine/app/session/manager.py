@@ -20,9 +20,6 @@ class SessionManager:
         organization_id: str,
         agent_id: str,
         call_id: Optional[str] = None,
-        call_direction: str = "inbound",
-        campaign_id: Optional[str] = None,
-        contact_id: Optional[str] = None,
         language: str = "te-IN",
         client_sample_rate: int = 16000,
         **kwargs
@@ -34,9 +31,6 @@ class SessionManager:
                 organization_id=organization_id,
                 agent_id=agent_id,
                 call_id=call_id,
-                call_direction=call_direction,
-                campaign_id=campaign_id,
-                contact_id=contact_id,
                 language=language,
                 client_sample_rate=client_sample_rate,
                 **kwargs

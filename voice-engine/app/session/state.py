@@ -71,9 +71,6 @@ class SessionState:
     organization_id: str
     agent_id: str
     call_id: Optional[str] = None
-    call_direction: str = "inbound"
-    campaign_id: Optional[str] = None
-    contact_id: Optional[str] = None
     language: str = "en-IN"
     preferred_language: Optional[str] = None
     language_selection_complete: bool = False

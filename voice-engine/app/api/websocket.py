@@ -167,9 +167,6 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                 if event_type == "session.start":
                     sess_id = payload.get("session_id") or generate_session_id()
                     call_id = payload.get("call_id")
-                    call_direction = payload.get("call_direction", "inbound")
-                    campaign_id = payload.get("campaign_id")
-                    contact_id = payload.get("contact_id")
                     org_id = payload.get("organization_id", "org_apex_univ")
                     agent_id = payload.get("agent_id", "agent_admission")
                     lang = payload.get("language", "te-IN")
@@ -186,9 +183,6 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                         organization_id=org_id,
                         agent_id=agent_id,
                         call_id=call_id,
-                        call_direction=call_direction,
-                        campaign_id=campaign_id,
-                        contact_id=contact_id,
                         language=lang,
                         client_sample_rate=sr,
                         template_type=template_type,
@@ -237,9 +231,6 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                             "call_id": session.call_id,
                             "organization_id": session.organization_id,
                             "agent_id": session.agent_id,
-                            "call_direction": session.call_direction,
-                            "campaign_id": session.campaign_id,
-                            "contact_id": session.contact_id,
                             "lead": lead
                         }))
                         await websocket.send_text(json.dumps({
@@ -248,9 +239,6 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                             "call_id": session.call_id,
                             "organization_id": session.organization_id,
                             "agent_id": session.agent_id,
-                            "call_direction": session.call_direction,
-                            "campaign_id": session.campaign_id,
-                            "contact_id": session.contact_id,
                             "summary": summary
                         }))
                     break
