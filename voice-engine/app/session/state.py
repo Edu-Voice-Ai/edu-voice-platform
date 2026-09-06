@@ -6,6 +6,7 @@ import time
 from app.core.ids import generate_turn_id, generate_generation_id
 from app.pipeline.cancellation import CancellationToken
 from app.core.logging import get_logger
+from app.audio.speaker_lock import AdaptiveSpeakerVoiceProfiler
 
 logger = get_logger("session.state")
 
@@ -55,6 +56,7 @@ class EphemeralTurnState:
     generated_text: str = ""
     tts_audio_chunks_count: int = 0
     barge_in_handled: bool = False
+    is_post_barge_in: bool = False
 
     def cancel(self, reason: str = "Interrupted by user"):
         """Cancel this turn and transition state."""
@@ -69,14 +71,55 @@ class SessionState:
     organization_id: str
     agent_id: str
     call_id: Optional[str] = None
+    call_direction: str = "inbound"
+    campaign_id: Optional[str] = None
+    contact_id: Optional[str] = None
     language: str = "en-IN"
     preferred_language: Optional[str] = None
     language_selection_complete: bool = False
     institution_name: str = "Apex University"
+    business_name: str = "Apex University"
+    template_type: str = "education"
+    agent_name: Optional[str] = None
+    agent_config: Optional[Any] = None
+    system_prompt: Optional[str] = None
+    greeting_message: Optional[str] = None
+    goodbye_message: Optional[str] = None
     client_sample_rate: int = 16000
     created_at_ms: float = field(default_factory=lambda: time.time() * 1000)
     is_active: bool = True
     user_has_floor: bool = False
+
+    def __post_init__(self):
+        if self.business_name != "Apex University" and self.institution_name == "Apex University":
+            self.institution_name = self.business_name
+        elif self.institution_name != "Apex University" and self.business_name == "Apex University":
+            self.business_name = self.institution_name
+
+    def get_greeting_text(self) -> str:
+        """Resolve greeting text using the active agent template or configuration."""
+        if self.greeting_message:
+            return self.greeting_message
+        try:
+            from app.templates.registry import AgentTemplateRegistry
+            template = AgentTemplateRegistry.get_template(self.template_type)
+            active_lang = self.preferred_language or self.language or "en-IN"
+            return template.get_greeting(self, lang=active_lang)
+        except Exception:
+            return f"Welcome to {self.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+
+    def get_goodbye_text(self) -> str:
+        """Resolve goodbye text using the active agent template or configuration."""
+        if self.goodbye_message:
+            return self.goodbye_message
+        try:
+            from app.templates.registry import AgentTemplateRegistry
+            template = AgentTemplateRegistry.get_template(self.template_type)
+            active_lang = self.preferred_language or self.language or "en-IN"
+            return template.get_goodbye(self, lang=active_lang)
+        except Exception:
+            return f"Thank you for reaching out to {self.business_name}. Have a wonderful day!"
+
     
     # Conversation History (List of dicts: {"role": "user"|"assistant"|"system"|"tool", "content": ...})
     messages: List[Dict[str, Any]] = field(default_factory=list)
@@ -93,6 +136,7 @@ class SessionState:
     two_minute_permission_asked: bool = False
     consent_clarification_asked: bool = False
     consent_granted: Optional[bool] = None
+    consecutive_empty_turns: int = 0
     is_greeting_playing: bool = False
     greeting_state: GreetingStateEnum = GreetingStateEnum.NOT_STARTED
     generation_states: Dict[str, GenerationLifecycleState] = field(default_factory=dict)
@@ -118,7 +162,42 @@ class SessionState:
     is_bot_speaking: bool = False
     last_response_text: Optional[str] = None
     turn_count: int = 0
+    # Cost & Delivery Telemetry
+    tts_requests_count: int = 0
+    tts_chars_count: int = 0
+    tts_pcm_bytes: int = 0
+    tts_dedup_hits: int = 0
+    tts_cancelled_count: int = 0
+    tts_not_played_count: int = 0
+    tts_retries_count: int = 0
+    tts_after_disconnect_count: int = 0
+    tts_after_barge_in_count: int = 0
+    is_disconnected: bool = False
     playback_estimated_end_time_ms: float = 0.0
+
+    # Adaptive Speaker Voice Profiler — locks onto primary caller's vocal identity on Turn 1
+    speaker_profiler: AdaptiveSpeakerVoiceProfiler = field(default_factory=AdaptiveSpeakerVoiceProfiler)
+
+    def log_cost_summary(self) -> str:
+        """Format and return structured VOICE COST SUMMARY for call telemetry."""
+        avg_chars = int(self.tts_chars_count / max(self.tts_requests_count, 1))
+        summary = (
+            f"\n=============================\n"
+            f"VOICE COST SUMMARY\n"
+            f"=============================\n"
+            f"turns={self.turn_count}\n"
+            f"tts_requests={self.tts_requests_count}\n"
+            f"tts_chars={self.tts_chars_count}\n"
+            f"tts_avg_chars={avg_chars}\n"
+            f"tts_duplicates={self.tts_dedup_hits}\n"
+            f"tts_cancelled={self.tts_cancelled_count}\n"
+            f"tts_not_played={self.tts_not_played_count}\n"
+            f"tts_retries={self.tts_retries_count}\n"
+            f"tts_after_disconnect={self.tts_after_disconnect_count}\n"
+            f"tts_after_barge_in={self.tts_after_barge_in_count}\n"
+            f"============================="
+        )
+        return summary
 
     def extend_playback_deadline(self, duration_ms: float = 20.0):
         """Accumulate remaining physical playback time even when frames are queued faster than realtime."""
@@ -136,11 +215,14 @@ class SessionState:
         if force or now_ms >= float(self.playback_estimated_end_time_ms or 0.0):
             self.is_bot_speaking = False
             self.playback_estimated_end_time_ms = 0.0
-            if self.current_turn and self.current_turn.state == TurnStateEnum.SPEAKING:
-                self.current_turn.state = TurnStateEnum.IDLE
+            self.user_has_floor = True
+            if hasattr(self, "conversation_state"):
+                self.conversation_state = "LISTENING"
+            if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.IDLE):
+                self.current_turn.state = TurnStateEnum.LISTENING
 
     def signal_playback_interrupt(self):
-        """Wake the telephony writer immediately so it can send Exotel clear instead of finishing a pacing sleep."""
+        """Wake the transport writer immediately so it can interrupt playback instead of finishing a pacing sleep."""
         import asyncio
         ev = getattr(self, "_playback_interrupt_event", None)
         if ev is None:
@@ -286,8 +368,10 @@ class SessionState:
         msg = {"role": role, "content": content, "timestamp": time.time(), **kwargs}
         self.messages.append(msg)
 
-    def close(self):
-        """Close session and cancel active turn."""
+    def close(self, reason: str = "Session closed"):
+        """Close session and cancel active turn and generations."""
         self.is_active = False
+        self.is_disconnected = True
+        self.invalidate_active_generation(reason=reason)
         if self.current_turn:
-            self.current_turn.cancel("Session closed")
+            self.current_turn.cancel(reason)

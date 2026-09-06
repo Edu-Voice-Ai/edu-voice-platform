@@ -25,6 +25,9 @@ class TurnMetrics:
     barge_in_flushed_time_ms: Optional[float] = None
     response_chars: int = 0
     tts_chunks_count: int = 0
+    fast_router_hit: bool = False
+    fast_router_latency_ms: float = 0.0
+    llm_queue_wait_ms: float = 0.0
 
     @property
     def vad_latency_ms(self) -> float:
@@ -76,6 +79,9 @@ class TurnMetrics:
             "total_turn_latency_ms": round(self.total_turn_latency_ms, 2),
             "response_chars": self.response_chars,
             "tts_chunks_count": self.tts_chunks_count,
+            "fast_router_hit": self.fast_router_hit,
+            "fast_router_latency_ms": round(self.fast_router_latency_ms, 2),
+            "llm_queue_wait_ms": round(self.llm_queue_wait_ms, 2),
             "barge_in_latency_ms": round(self.barge_in_latency_ms, 2) if self.barge_in_latency_ms is not None else None
         }
 

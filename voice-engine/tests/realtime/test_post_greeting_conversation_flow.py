@@ -23,14 +23,14 @@ def make_tm(session: SessionState) -> TurnManager:
 
 
 def simulate_greeting_response_end(session: SessionState):
-    """Simulate the exotel writer clearing playback state upon RESPONSE_END."""
+    """Simulate the transport writer clearing playback state upon RESPONSE_END."""
     session.is_bot_speaking = False
     session.active_playback_generation_id = None
     session.playback_estimated_end_time_ms = 0.0
 
 
 def simulate_post_tts_response_end(session: SessionState):
-    """Simulate exotel writer RESPONSE_END handler for normal TTS completion."""
+    """Simulate transport writer RESPONSE_END handler for normal TTS completion."""
     session.mark_playback_finished(force=True)
 
 
@@ -68,7 +68,7 @@ def test_case_1_greeting_english_selection():
     session.greeting_state = GreetingStateEnum.COMPLETED
     session.conversation_state = "WAITING_FOR_LANGUAGE"
 
-    # Simulate the exotel writer receiving RESPONSE_END for greeting
+    # Simulate the transport writer receiving RESPONSE_END for greeting
     simulate_greeting_response_end(session)
 
     assert session.is_bot_speaking is False, "is_bot_speaking must be False after greeting RESPONSE_END"
@@ -253,7 +253,7 @@ def test_case_6_barge_in_still_works_while_ai_speaking():
 # ──────────────────────────────────────────────────────────────────────────────
 def test_regression_is_bot_speaking_stuck_after_greeting():
     """
-    REGRESSION: Without RESPONSE_END handler in exotel writer,
+    REGRESSION: Without RESPONSE_END handler in transport writer,
     is_bot_speaking stays True after greeting → all user speech went through
     barge-in gate → conversation stalled.
 
@@ -262,7 +262,7 @@ def test_regression_is_bot_speaking_stuck_after_greeting():
     """
     session = make_session("test_regression")
 
-    # Simulate what exotel writer was doing BEFORE fix:
+    # Simulate what transport writer was doing BEFORE fix:
     # After last greeting packet, is_bot_speaking=True and was never cleared
     session.is_bot_speaking = True  # ← stuck True (the bug)
     session.active_playback_generation_id = None  # not set for greeting

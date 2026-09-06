@@ -13,7 +13,7 @@ async def test_race_a_stale_packet_held_across_pacing_sleep_dropped():
     """
     Race A: AI audio packet is already pulled from queue and held locally.
     Pacing sleep occurs. Meanwhile, user barge-in triggers and invalidates generation.
-    After pacing sleep wakes, the packet MUST be dropped and NOT sent to Exotel.
+    After pacing sleep wakes, the packet MUST be dropped and NOT sent to transport.
     """
     session = SessionState(session_id="s_race_a", organization_id="org1", agent_id="a1")
     session.language = "te-IN"
@@ -31,17 +31,17 @@ async def test_race_a_stale_packet_held_across_pacing_sleep_dropped():
     event_queue = asyncio.Queue()
 
     writer_state = {
-        "stream_sid": "stream_race_a",
+        "stream_id": "stream_race_a",
         "encoding": "audio/x-l16",
         "sample_rate": 8000,
         "outbound_media_count": 0,
         "last_handled_cancellation_cycle": -1
     }
 
-    # Helper runner for exotel writer loop logic
+    # Helper runner for transport writer loop logic
     async def writer_step(event):
         nonlocal writer_state
-        sid = writer_state.get("stream_sid")
+        sid = writer_state.get("stream_id")
         sr = writer_state.get("sample_rate", 8000)
         enc = writer_state.get("encoding", "audio/x-l16")
 
@@ -49,7 +49,7 @@ async def test_race_a_stale_packet_held_across_pacing_sleep_dropped():
             cycle_id = getattr(session, "cancellation_cycle_id", 0)
             if sid and cycle_id != writer_state["last_handled_cancellation_cycle"]:
                 writer_state["last_handled_cancellation_cycle"] = cycle_id
-                await ws.send_text(json.dumps({"event": "clear", "stream_sid": sid}))
+                await ws.send_text(json.dumps({"event": "clear", "stream_id": sid}))
             return
 
         if event.event in (EventType.AUDIO_OUTPUT, "audio.output"):
@@ -81,7 +81,7 @@ async def test_race_a_stale_packet_held_across_pacing_sleep_dropped():
             if is_stale():
                 return  # Dropped!
 
-            await ws.send_text(json.dumps({"event": "media", "stream_sid": sid}))
+            await ws.send_text(json.dumps({"event": "media", "stream_id": sid}))
 
     # Audio chunk from gen_100
     dummy_b64 = base64.b64encode(b"\x00" * 320).decode("ascii")
@@ -188,7 +188,7 @@ async def test_race_f_multiple_cancellation_events_produce_single_clear():
 
     ws = MockWebSocket()
     writer_state = {
-        "stream_sid": "stream_race_f",
+        "stream_id": "stream_race_f",
         "last_handled_cancellation_cycle": -1
     }
 
@@ -200,11 +200,11 @@ async def test_race_f_multiple_cancellation_events_produce_single_clear():
 
     for event in events:
         cycle_id = getattr(session, "cancellation_cycle_id", 0)
-        sid = writer_state.get("stream_sid")
+        sid = writer_state.get("stream_id")
         if event.event in (EventType.RESPONSE_CANCELLED, EventType.AUDIO_PLAYBACK_STOP, EventType.AUDIO_FLUSH):
             if sid and cycle_id != writer_state["last_handled_cancellation_cycle"]:
                 writer_state["last_handled_cancellation_cycle"] = cycle_id
-                await ws.send_text(json.dumps({"event": "clear", "stream_sid": sid}))
+                await ws.send_text(json.dumps({"event": "clear", "stream_id": sid}))
 
     # Exactly ONE CLEAR message must have been sent!
     clear_messages = [m for m in sent_messages if m.get("event") == "clear"]

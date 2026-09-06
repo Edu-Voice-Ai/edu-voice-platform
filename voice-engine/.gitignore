@@ -56,6 +56,7 @@ coverage.xml
 
 # Model files (large binaries — store in LFS or S3)
 *.onnx
+!app/vad/*.onnx
 *.pt
 *.bin
 *.safetensors

@@ -143,69 +143,84 @@ class FastQueryRouter:
         # 1. Handle Goodbye
         if cls.is_explicit_goodbye(user_text):
             session.conversation_state = "COMPLETED"
-            bye_msg = cls.GOODBYE_RESPONSES.get(active_lang, cls.GOODBYE_RESPONSES["en-IN"])
+            bye_msg = getattr(session, "get_goodbye_text", lambda: cls.GOODBYE_RESPONSES.get(active_lang, cls.GOODBYE_RESPONSES["en-IN"]))()
             logger.info(f"[FAST_ROUTER] Explicit goodbye detected; returning graceful farewell: \"{bye_msg}\"", extra={"session_id": session.session_id})
             return QueryComplexity.GOODBYE, bye_msg
 
-        # 1b. Handle Unoffered Programs Policy: Clear 1-sentence refusal + human counselor offer
-        unoffered_match = cls.detect_unoffered_course(user_text)
-        if unoffered_match:
-            course_name = unoffered_match
-            if active_lang == "te-IN":
-                unoffered_resp = f"మా దగ్గర ప్రస్తుతం {course_name} కోర్స్ లేదు, కేవలం B.Tech CSE మరియు ECE మాత్రమే ఉన్నాయి. మీరు కౌన్సెలర్ తో మాట్లాడాలనుకుంటున్నారా?"
-            elif active_lang == "hi-IN":
-                unoffered_resp = f"हमारे पास अभी {course_name} कोर्स नहीं है, हम केवल B.Tech CSE और ECE प्रदान करते हैं। क्या आप काउंसलर से बात करना चाहेंगे?"
-            else:
-                unoffered_resp = f"We do not offer {course_name} right now; we currently offer B.Tech in CSE and ECE. Would you like me to connect you with a human counselor?"
+        template_type = getattr(session, "template_type", "education")
 
-            logger.info(
-                f"[FAST_ROUTER] Unoffered program detected ({course_name}); returning policy response in {active_lang}",
-                extra={"session_id": session.session_id}
-            )
-            return QueryComplexity.SIMPLE, unoffered_resp
+        if template_type == "education":
+            # 1b. Handle Unoffered Programs Policy: Clear 1-sentence refusal + human counselor offer
+            unoffered_match = cls.detect_unoffered_course(user_text)
+            if unoffered_match:
+                course_name = unoffered_match
+                if active_lang == "te-IN":
+                    unoffered_resp = f"మా దగ్గర ప్రస్తుతం {course_name} కోర్స్ లేదు, కేవలం B.Tech CSE మరియు ECE మాత్రమే ఉన్నాయి. మీరు కౌన్సెలర్ తో మాట్లాడాలనుకుంటున్నారా?"
+                elif active_lang == "hi-IN":
+                    unoffered_resp = f"हमारे पास अभी {course_name} कोर्स नहीं है, हम केवल B.Tech CSE और ECE प्रदान करते हैं। क्या आप काउंसलर से बात करना चाहेंगे?"
+                else:
+                    unoffered_resp = f"We do not offer {course_name} right now; we currently offer B.Tech in CSE and ECE. Would you like me to connect you with a human counselor?"
 
-        # 2. Normalize and check complexity
-        normalized = SemanticQueryNormalizer.normalize(user_text)
-        complexity = cls.classify_complexity(normalized, user_text)
-
-        if complexity == QueryComplexity.COMPLEX or not rag_provider:
-            return QueryComplexity.COMPLEX, None
-
-        # 3. Fast verified retrieval from RAG
-        try:
-            query = RetrievalQuery(
-                organization_id=session.organization_id,
-                agent_id=session.agent_id,
-                query_text=user_text,
-                top_k=2
-            )
-            res = await rag_provider.retrieve(query)
-            if not res.has_verified_info or not res.items:
-                return QueryComplexity.COMPLEX, None
-
-            primary_item: KnowledgeItem = res.items[0]
-            fast_response = cls._format_fast_answer(normalized, primary_item, active_lang)
-
-            # Anti-repetition check: If the immediate previous assistant message was already this exact fast response,
-            # do not reuse it. Delegate to LLM for fresh contextual answer!
-            if fast_response and session.messages:
-                last_asst_msgs = [m["content"] for m in session.messages if m.get("role") == "assistant"]
-                if last_asst_msgs and last_asst_msgs[-1].strip() == fast_response.strip():
-                    logger.info(
-                        f"[FAST_ROUTER] Fast response matches immediate previous response; delegating to LLM for fresh contextual answer",
-                        extra={"session_id": session.session_id}
-                    )
-                    return QueryComplexity.COMPLEX, None
-
-            if fast_response:
                 logger.info(
-                    f"[FAST_ROUTER] Fast verified response generated for intent={normalized.intent.value} "
-                    f"lang={active_lang}: \"{fast_response}\"",
+                    f"[FAST_ROUTER] Unoffered program detected ({course_name}); returning policy response in {active_lang}",
                     extra={"session_id": session.session_id}
                 )
-                return QueryComplexity.SIMPLE, fast_response
+                return QueryComplexity.SIMPLE, unoffered_resp
+
+            # 2. Normalize and check complexity
+            normalized = SemanticQueryNormalizer.normalize(user_text)
+            complexity = cls.classify_complexity(normalized, user_text)
+
+            if complexity == QueryComplexity.COMPLEX or not rag_provider:
+                return QueryComplexity.COMPLEX, None
+
+            # 3. Fast verified retrieval from RAG
+            try:
+                query = RetrievalQuery(
+                    organization_id=session.organization_id,
+                    agent_id=session.agent_id,
+                    query_text=user_text,
+                    top_k=2
+                )
+                res = await rag_provider.retrieve(query)
+                if not res.has_verified_info or not res.items:
+                    return QueryComplexity.COMPLEX, None
+
+                primary_item: KnowledgeItem = res.items[0]
+                fast_response = cls._format_fast_answer(normalized, primary_item, active_lang)
+
+                # Anti-repetition check: If the immediate previous assistant message was already this exact fast response,
+                # do not reuse it. Delegate to LLM for fresh contextual answer!
+                if fast_response and session.messages:
+                    last_asst_msgs = [m["content"] for m in session.messages if m.get("role") == "assistant"]
+                    if last_asst_msgs and last_asst_msgs[-1].strip() == fast_response.strip():
+                        logger.info(
+                            f"[FAST_ROUTER] Fast response matches immediate previous response; delegating to LLM for fresh contextual answer",
+                            extra={"session_id": session.session_id}
+                        )
+                        return QueryComplexity.COMPLEX, None
+
+                if fast_response:
+                    logger.info(
+                        f"[FAST_ROUTER] Fast verified response generated for intent={normalized.intent.value} "
+                        f"lang={active_lang}: \"{fast_response}\"",
+                        extra={"session_id": session.session_id}
+                    )
+                    return QueryComplexity.SIMPLE, fast_response
+            except Exception as e:
+                logger.warning(f"[FAST_ROUTER] Fast path resolution error: {e}; falling back to LLM", extra={"session_id": session.session_id})
+
+            return QueryComplexity.COMPLEX, None
+
+        # Non-education templates: Check optional template-defined fast router rules or delegate cleanly to LLM
+        try:
+            from app.templates.registry import AgentTemplateRegistry
+            template = AgentTemplateRegistry.get_template(template_type)
+            fast_resp = template.get_fast_router_rules(session, user_text)
+            if fast_resp:
+                return QueryComplexity.SIMPLE, fast_resp
         except Exception as e:
-            logger.warning(f"[FAST_ROUTER] Fast path resolution error: {e}; falling back to LLM", extra={"session_id": session.session_id})
+            logger.debug(f"[FAST_ROUTER] Template fast rules notice: {e}")
 
         return QueryComplexity.COMPLEX, None
 

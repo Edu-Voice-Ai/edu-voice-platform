@@ -20,8 +20,12 @@ class SessionManager:
         organization_id: str,
         agent_id: str,
         call_id: Optional[str] = None,
+        call_direction: str = "inbound",
+        campaign_id: Optional[str] = None,
+        contact_id: Optional[str] = None,
         language: str = "te-IN",
-        client_sample_rate: int = 16000
+        client_sample_rate: int = 16000,
+        **kwargs
     ) -> SessionState:
         """Create and register a new isolated SessionState."""
         async with self._lock:
@@ -30,11 +34,15 @@ class SessionManager:
                 organization_id=organization_id,
                 agent_id=agent_id,
                 call_id=call_id,
+                call_direction=call_direction,
+                campaign_id=campaign_id,
+                contact_id=contact_id,
                 language=language,
-                client_sample_rate=client_sample_rate
+                client_sample_rate=client_sample_rate,
+                **kwargs
             )
             self._sessions[session_id] = session
-            logger.info(f"Created session {session_id} for org={organization_id}, agent={agent_id}", extra={"session_id": session_id})
+            logger.info(f"Created session {session_id} for org={organization_id}, agent={agent_id}, template={kwargs.get('template_type', 'education')}", extra={"session_id": session_id})
             return session
 
     async def get_session(self, session_id: str) -> SessionState:

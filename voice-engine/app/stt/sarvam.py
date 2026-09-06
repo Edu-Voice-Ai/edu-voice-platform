@@ -422,10 +422,16 @@ class SarvamStreamingSTTSession:
         lang = language_code or self.language_code
         raw_audio = audio_bytes if (audio_bytes is not None and len(audio_bytes) > 0) else bytes(self._turn_audio_buffer)
 
+        def _safe_reset():
+            # Only reset if the current session turn is still this turn or unassigned,
+            # avoiding wiping subsequent turn buffers that began accumulating audio concurrently.
+            if self._current_turn_id == turn_id or self._current_turn_id is None:
+                self.reset_turn(turn_id)
+
         # Fast Fail-Fast: If stream is known unhealthy or degraded, do NOT wait for timeout!
         if not self.is_stream_healthy:
             logger.info("[STT_STREAM] Stream unhealthy/disconnected; executing immediate batch REST fallback (0ms wait)")
-            self.reset_turn(turn_id)
+            _safe_reset()
             return await self.provider.transcribe_audio(raw_audio, sample_rate=16000, language_code=lang)
 
         # Attempt low-latency realtime finalization if WebSocket is healthy
@@ -444,7 +450,7 @@ class SarvamStreamingSTTSession:
                         extra={"lang": self._final_language}
                     )
                     result = STTResult(text=transcript, language_code=self._final_language, confidence=0.95)
-                    self.reset_turn(turn_id)
+                    _safe_reset()
                     return result
             except asyncio.TimeoutError:
                 interim = (self._interim_transcript or "").strip()
@@ -457,14 +463,14 @@ class SarvamStreamingSTTSession:
                         extra={"lang": self._final_language}
                     )
                     result = STTResult(text=interim, language_code=self._final_language, confidence=0.85)
-                    self.reset_turn(turn_id)
+                    _safe_reset()
                     return result
                 logger.debug("[STT_STREAM] Realtime finalization timed out (250ms); falling back to batch REST")
         except Exception as ex:
             logger.debug(f"[STT_STREAM] Realtime finalization notice ({ex}); falling back to batch REST")
 
         # Fallback path: standard batch REST transcribe_audio with ground truth turn buffer
-        self.reset_turn(turn_id)
+        _safe_reset()
         return await self.provider.transcribe_audio(raw_audio, sample_rate=16000, language_code=lang)
 
     def reset_turn(self, turn_id: Optional[str] = None) -> None:

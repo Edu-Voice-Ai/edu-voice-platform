@@ -1,7 +1,16 @@
 """Acoustic feature extraction and multi-dimensional voice discrimination."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import numpy as np
+
+
+try:
+    from scipy import signal as scipy_signal
+    _VOCAL_BAND_SOS_16K = scipy_signal.butter(4, [300, 3400], btype="bandpass", fs=16000, output="sos")
+    _VOCAL_BAND_SOS_8K = scipy_signal.butter(4, [300, 3400], btype="bandpass", fs=8000, output="sos")
+except Exception:
+    _VOCAL_BAND_SOS_16K = None
+    _VOCAL_BAND_SOS_8K = None
 
 
 @dataclass
@@ -18,10 +27,86 @@ class AcousticFeatures:
     is_breath_or_mouth: bool
     is_acoustic_echo: bool
     is_valid_speech: bool
+    vocal_band_rms: float = 0.0
+    vocal_energy_ratio: float = 0.0
+    # Backchannel / passive listening hum detection
+    spectral_flux: float = 0.5        # Rate of spectral change across consecutive 20ms frames (0.0=static hum, 0.5+=dynamic speech)
+    is_backchannel_hum: bool = False  # True if frame is a monotone nasal hum ("hmmm", "uh-huh") — NOT a real interruption
+    spectral_flatness: float = 0.5    # Wiener entropy [0.0, 1.0] (<0.38 for voiced speech, >0.45 for noise/breath)
+    harmonicity: float = 0.0          # Normalized pitch harmonicity autocorrelation peak [0.0, 1.0] (>=0.35 for voiced speech)
+    pitch_f0_hz: float = 0.0          # Estimated fundamental frequency in Hz (65Hz - 450Hz)
+    is_voiced_frame: bool = False     # True if frame satisfies energy, pitch, flatness, harmonicity, and ZCR voiced speech criteria
+    crest_factor: float = 1.0         # Peak-to-RMS ratio (clicks/transients: >10, speech: 2-8, hum: ~1-3, silence: 0)
+    spectral_fft: Optional[np.ndarray] = None  # Magnitude spectrum of current frame for spectral flux tracking
+
+    def __post_init__(self):
+        if self.harmonicity == 0.0 and self.pitch_periodicity > 0.0:
+            self.harmonicity = self.pitch_periodicity
+        if not self.is_voiced_frame:
+            if (
+                self.is_valid_speech
+                and not self.is_breath_or_mouth
+                and not self.is_transient
+                and not self.is_backchannel_hum
+                and not self.is_acoustic_echo
+                and (self.pitch_periodicity >= 0.35 or self.harmonicity >= 0.35)
+                and (self.vocal_band_rms >= 0.022 or self.rms >= 0.025)
+                and self.zcr <= 0.25
+            ):
+                self.is_voiced_frame = True
+                if self.spectral_flatness == 0.5:
+                    self.spectral_flatness = 0.20
 
 
 class AcousticFeatureExtractor:
     """Analyzes audio signals using energy, spectral distribution, pitch periodicity, and echo correlation."""
+
+    @classmethod
+    def filter_vocal_band(cls, audio_float: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
+        """Apply 300Hz - 3400Hz Butterworth bandpass filter to isolate human vocal tract frequencies."""
+        if len(audio_float) < 16:
+            return audio_float
+        sos = _VOCAL_BAND_SOS_16K if sample_rate == 16000 else _VOCAL_BAND_SOS_8K
+        if sos is not None:
+            try:
+                from scipy import signal as scipy_signal
+                return scipy_signal.sosfilt(sos, audio_float).astype(np.float32)
+            except Exception:
+                pass
+        # Fallback FFT bandpass filter if scipy filter is unavailable
+        n = len(audio_float)
+        rfft_vals = np.fft.rfft(audio_float)
+        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+        mask = (freqs >= 300) & (freqs <= 3400)
+        rfft_vals[~mask] = 0.0
+        return np.fft.irfft(rfft_vals, n=n).astype(np.float32)
+
+    @classmethod
+    def compute_vocal_band_features(
+        cls, audio_float: np.ndarray, sample_rate: int = 16000
+    ) -> Tuple[float, float, float]:
+        """
+        Calculate telephony speech-band energy ratio (300Hz - 3400Hz), vocal band RMS, and spectral centroid.
+        Returns: (vocal_band_rms, vocal_energy_ratio, spectral_centroid)
+        """
+        if len(audio_float) < 16:
+            return 0.0, 0.0, 0.0
+
+        vocal_filtered = cls.filter_vocal_band(audio_float, sample_rate)
+        vocal_band_rms = cls.compute_rms(vocal_filtered)
+
+        n = len(audio_float)
+        windowed = audio_float * np.hanning(n)
+        fft_vals = np.abs(np.fft.rfft(windowed))
+        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+
+        total_energy = np.sum(fft_vals**2) + 1e-10
+        speech_band_mask = (freqs >= 300) & (freqs <= 3400)
+        speech_band_energy = np.sum(fft_vals[speech_band_mask]**2)
+        vocal_energy_ratio = float(min(1.0, max(0.0, speech_band_energy / total_energy)))
+
+        centroid = float(np.sum(freqs * fft_vals) / (np.sum(fft_vals) + 1e-10))
+        return vocal_band_rms, vocal_energy_ratio, centroid
 
     @staticmethod
     def compute_rms(audio_float: np.ndarray) -> float:
@@ -38,29 +123,13 @@ class AcousticFeatureExtractor:
         zero_crossings = np.sum(np.abs(np.diff(np.sign(audio_float)))) / 2.0
         return float(zero_crossings / len(audio_float))
 
-    @staticmethod
+    @classmethod
     def compute_speech_band_and_centroid(
-        audio_float: np.ndarray, sample_rate: int = 16000
+        cls, audio_float: np.ndarray, sample_rate: int = 16000
     ) -> Tuple[float, float]:
-        """
-        Calculate telephony speech-band energy ratio (300Hz - 3400Hz) and spectral centroid.
-        Returns: (speech_band_ratio, spectral_centroid)
-        """
-        if len(audio_float) < 32:
-            return 0.0, 0.0
-
-        n = len(audio_float)
-        windowed = audio_float * np.hanning(n)
-        fft_vals = np.abs(np.fft.rfft(windowed))
-        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
-
-        total_energy = np.sum(fft_vals**2) + 1e-10
-        speech_band_mask = (freqs >= 300) & (freqs <= 3400)
-        speech_band_energy = np.sum(fft_vals[speech_band_mask]**2)
-        speech_band_ratio = float(speech_band_energy / total_energy)
-
-        centroid = float(np.sum(freqs * fft_vals) / (np.sum(fft_vals) + 1e-10))
-        return speech_band_ratio, centroid
+        """Calculate telephony speech-band energy ratio (300Hz - 3400Hz) and spectral centroid."""
+        _, vocal_energy_ratio, centroid = cls.compute_vocal_band_features(audio_float, sample_rate)
+        return vocal_energy_ratio, centroid
 
     @staticmethod
     def compute_pitch_periodicity(
@@ -88,6 +157,63 @@ class AcousticFeatureExtractor:
             peak = float(np.max(autocorr[min_lag:max_lag]))
             return max(0.0, min(peak, 1.0))
         return 0.0
+
+    @staticmethod
+    def compute_spectral_flatness(
+        audio_float: np.ndarray, sample_rate: int = 16000
+    ) -> float:
+        """
+        Calculate Spectral Flatness (Wiener entropy) in the telephony vocal range (300Hz - 3400Hz).
+        Flatness = Geometric Mean(Power Spectrum) / Arithmetic Mean(Power Spectrum).
+        Voiced human speech has resonant formants / harmonic peaks -> Low flatness (< 0.38).
+        Noise, breaths, friction, and clicks have flat spectrum -> High flatness (> 0.45).
+        """
+        n = len(audio_float)
+        if n < 32:
+            return 1.0
+        windowed = audio_float * np.hanning(n)
+        rfft_vals = np.abs(np.fft.rfft(windowed))
+        freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+
+        mask = (freqs >= 300) & (freqs <= 3400)
+        power_spectrum = (rfft_vals[mask] ** 2) + 1e-12
+        if len(power_spectrum) == 0:
+            return 1.0
+
+        arithmetic_mean = np.mean(power_spectrum)
+        log_mean = np.mean(np.log(power_spectrum))
+        geometric_mean = np.exp(log_mean)
+
+        flatness = float(geometric_mean / (arithmetic_mean + 1e-12))
+        return float(min(1.0, max(0.0, flatness)))
+
+    @staticmethod
+    def compute_pitch_and_harmonicity(
+        audio_float: np.ndarray, sample_rate: int = 16000
+    ) -> Tuple[float, float]:
+        """
+        Estimate fundamental frequency f0 (Hz) and harmonicity peak in human vocal pitch range (65 Hz - 450 Hz).
+        Returns (f0_hz, harmonicity_peak).
+        """
+        n = len(audio_float)
+        if n < 160:
+            return 0.0, 0.0
+
+        centered = audio_float - np.mean(audio_float)
+        norm_factor = np.sum(centered**2) + 1e-10
+        autocorr = np.correlate(centered, centered, mode="full")
+        autocorr = autocorr[n - 1 :] / norm_factor
+
+        min_lag = max(1, int(sample_rate / 450))  # ~35 samples @ 16kHz (450 Hz)
+        max_lag = min(len(autocorr) - 1, int(sample_rate / 65))   # ~246 samples @ 16kHz (65 Hz)
+
+        if max_lag > min_lag and max_lag < len(autocorr):
+            peak_idx = int(np.argmax(autocorr[min_lag:max_lag])) + min_lag
+            peak_val = float(autocorr[peak_idx])
+            if peak_val >= 0.20:
+                f0_hz = float(sample_rate / peak_idx)
+                return f0_hz, float(max(0.0, min(peak_val, 1.0)))
+        return 0.0, 0.0
 
     @staticmethod
     def compute_echo_correlation(
@@ -122,21 +248,88 @@ class AcousticFeatureExtractor:
         except Exception:
             return 0.0
 
+    @staticmethod
+    def compute_spectral_flux(
+        audio_float: np.ndarray,
+        prev_frame_fft: Optional[np.ndarray],
+        sample_rate: int = 16000
+    ) -> Tuple[float, Optional[np.ndarray]]:
+        """
+        Compute spectral flux — the L2 norm of the magnitude spectrum difference between
+        the current frame and the previous frame, normalised to [0, 1].
+
+        Acoustic discrimination:
+          - Real spoken words ("Wait", "Stop", "Fee", "ఆగండి"): High flux (> 0.15) due to
+            rapid consonant-vowel formant transitions.
+          - Monotone nasal backchannels ("hmmm", "mm", "uh-huh", "హ్మ్"): Near-zero flux
+            (< 0.06) because the vocal tract shape is static throughout the hum.
+          - Silence / noise: flux ~ 0.0 (no spectral content change).
+
+        Returns:
+            (spectral_flux: float, current_frame_fft: np.ndarray) — the caller caches
+            current_frame_fft and passes it back as prev_frame_fft on the next call.
+        """
+        n = len(audio_float)
+        if n < 32:
+            return 0.0, None
+
+        windowed = audio_float * np.hanning(n)
+        current_fft = np.abs(np.fft.rfft(windowed)).astype(np.float32)
+
+        if prev_frame_fft is None or len(prev_frame_fft) != len(current_fft):
+            # First frame — no previous to compare against; return 0 flux
+            return 0.0, current_fft
+
+        # Normalized L2 spectral flux
+        diff = current_fft - prev_frame_fft
+        norm_factor = (np.sum(current_fft ** 2) + np.sum(prev_frame_fft ** 2)) * 0.5 + 1e-10
+        flux = float(np.sqrt(np.sum(diff ** 2)) / np.sqrt(norm_factor))
+        return min(flux, 1.0), current_fft
+
     @classmethod
     def analyze_frame(
         cls,
         audio_float: np.ndarray,
         noise_floor: float = 0.002,
         outbound_ref: Optional[np.ndarray] = None,
-        sample_rate: int = 16000
-    ) -> AcousticFeatures:
+        sample_rate: int = 16000,
+        prev_frame_fft: Optional[np.ndarray] = None,
+    ) -> "AcousticFeatures":
         """Perform comprehensive acoustic feature analysis on an audio frame."""
         rms = cls.compute_rms(audio_float)
-        snr_db = 20.0 * np.log10(max(rms, 1e-6) / max(noise_floor, 1e-6))
+        vocal_band_rms, vocal_energy_ratio, centroid = cls.compute_vocal_band_features(audio_float, sample_rate)
+        speech_band_ratio = vocal_energy_ratio
+        snr_db = 20.0 * np.log10(max(vocal_band_rms, 1e-6) / max(noise_floor, 1e-6))
         zcr = cls.compute_zcr(audio_float)
-        speech_band_ratio, centroid = cls.compute_speech_band_and_centroid(audio_float, sample_rate)
         pitch_periodicity = cls.compute_pitch_periodicity(audio_float, sample_rate)
         echo_corr = cls.compute_echo_correlation(audio_float, outbound_ref)
+
+        # ── Crest Factor (Peak-to-RMS ratio) ─────────────────────────────────
+        # Transient clicks/line pops exhibit very high crest factors (>10).
+        # Normal speech ranges from 2 to 8. Monotone hums cluster near 1–3.
+        if rms > 1e-6 and len(audio_float) > 0:
+            peak_amplitude = float(np.max(np.abs(audio_float)))
+            crest_factor = float(peak_amplitude / rms)
+        else:
+            crest_factor = 1.0
+
+        # ── Spectral Flux & Backchannel Detection ────────────────────────────────
+        spectral_flux, current_fft = cls.compute_spectral_flux(audio_float, prev_frame_fft, sample_rate)
+
+        # ── Enhanced Nasal Hum / Passive Backchannel Detector ─────────────────
+        # Passive listening sounds ("hmm", "hmmm", "hm", "uh-huh", "mm", "ఊ", "హ్మ్"):
+        # 1. Closed lips / nasal radiation trap: low spectral centroid (< 950 Hz) and low ZCR (< 0.20).
+        # 2. Monotone stationary spectrum: low spectral flux (< 0.15) and high periodicity (>= 0.25).
+        # 3. Operates across entire conversational volume range (from faint 0.003 up to loud 0.30 RMS).
+        is_backchannel_hum = bool(
+            rms >= 0.003
+            and (
+                # Signature A: Low-centroid closed-mouth/nasal murmur (energy trapped below 950Hz)
+                (centroid < 950.0 and zcr < 0.20 and pitch_periodicity >= 0.25)
+                # Signature B: Monotone low-flux vocalization without dynamic formant transitions
+                or (spectral_flux < 0.15 and zcr < 0.22 and pitch_periodicity >= 0.30 and centroid < 1150.0)
+            )
+        )
 
         # Classification heuristics based on empirical acoustic boundaries:
         # 1. Acoustic Echo: High cross-correlation with outbound AI audio (> 0.60)
@@ -149,21 +342,52 @@ class AcousticFeatureExtractor:
         )
 
         # 3. Transient click/pop: Very short burst with high centroid (> 3500Hz) and zero harmonic periodicity
+        # Enhanced with crest factor: line pops / key clicks have extreme crest factor (> 12)
         is_transient = bool(
             (centroid >= 3500 and pitch_periodicity < 0.15 and zcr < 0.05) or
-            (rms > 0.05 and pitch_periodicity < 0.10 and centroid >= 3800)
+            (rms > 0.05 and pitch_periodicity < 0.10 and centroid >= 3800) or
+            (crest_factor > 12.0 and pitch_periodicity < 0.15 and rms < 0.04)
         )
 
-        # 4. Valid Speech: Requires harmonic structure, telephony speech-band energy, and SNR above noise floor
+        # 4. Valid Speech: Requires vocal energy concentration, harmonic structure, and SNR above noise floor
         is_valid_speech = bool(
             (not is_acoustic_echo) and
             (not is_breath_or_mouth) and
             (not is_transient) and
             (
+                (vocal_energy_ratio >= 0.60 and vocal_band_rms >= 0.012 and (pitch_periodicity >= 0.20 or snr_db >= 3.0)) or
                 (pitch_periodicity >= 0.25 and speech_band_ratio >= 0.15 and snr_db >= 3.0) or
                 (speech_band_ratio >= 0.40 and snr_db >= 6.0 and pitch_periodicity >= 0.20) or
                 (rms >= 0.035 and pitch_periodicity >= 0.25 and speech_band_ratio >= 0.15)
             )
+        )
+
+        # ── Spectral Flatness & Pitch Harmonicity ─────────────────────────────────
+        pitch_f0_hz, harmonicity = cls.compute_pitch_and_harmonicity(audio_float, sample_rate)
+        if pitch_periodicity == 0.0 and harmonicity > 0.0:
+            pitch_periodicity = harmonicity
+        spectral_flatness = cls.compute_spectral_flatness(audio_float, sample_rate)
+
+        # ── Voiced Speech Frame Detection ─────────────────────────────────────
+        # A 20ms frame is genuinely VOICED human speech if:
+        # 1. Energy: vocal band RMS >= 0.022 or broadband RMS >= 0.025
+        # 2. Harmonicity: strong harmonic structure (>= 0.35 or pitch_periodicity >= 0.35)
+        # 3. Spectral Flatness: tonal/formant peak structure (<= 0.38, NOT flat noise/breaths)
+        # 4. Zero-Crossing Rate: low to moderate (<= 0.22, NOT high-frequency hiss/friction)
+        # 5. Pitch: valid human vocal tract fundamental frequency (65Hz - 450Hz) or confident periodicity
+        # 6. NOT breath, transient click, or backchannel hum
+        # 7. NOT extreme crest factor (line pop / click guard)
+        is_voiced_frame = bool(
+            (vocal_band_rms >= 0.022 or rms >= 0.025)
+            and (harmonicity >= 0.35 or pitch_periodicity >= 0.35)
+            and spectral_flatness <= 0.38
+            and zcr <= 0.22
+            and (65.0 <= pitch_f0_hz <= 450.0 or pitch_periodicity >= 0.40)
+            and (not is_breath_or_mouth)
+            and (not is_transient)
+            and (not is_backchannel_hum)
+            and spectral_flux >= 0.08
+            and crest_factor <= 10.0  # Reject extreme transient impulses
         )
 
         return AcousticFeatures(
@@ -177,5 +401,16 @@ class AcousticFeatureExtractor:
             is_transient=is_transient,
             is_breath_or_mouth=is_breath_or_mouth,
             is_acoustic_echo=is_acoustic_echo,
-            is_valid_speech=is_valid_speech
+            is_valid_speech=is_valid_speech,
+            vocal_band_rms=vocal_band_rms,
+            vocal_energy_ratio=vocal_energy_ratio,
+            spectral_flux=spectral_flux,
+            is_backchannel_hum=is_backchannel_hum,
+            spectral_flatness=spectral_flatness,
+            harmonicity=harmonicity,
+            pitch_f0_hz=pitch_f0_hz,
+            is_voiced_frame=is_voiced_frame,
+            crest_factor=crest_factor,
+            spectral_fft=current_fft,
         )
+

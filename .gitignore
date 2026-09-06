@@ -72,7 +72,18 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Certificates & Archives
+# Certificates, Keys & Secrets
 *.pem
 **/*.pem
+*.key
+**/*.key
+*.crt
+**/*.crt
+*.secret
+**/*.secret
+secrets/
+**/secrets/
+credentials/
+**/credentials/
 *.tar.gz
+

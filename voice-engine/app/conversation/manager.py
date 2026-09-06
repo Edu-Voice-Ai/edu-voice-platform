@@ -56,16 +56,7 @@ class ConversationManager:
 
                 # Check if user asked a question along with the switch (e.g. 'Switch to Hindi, what is the CSE fee?')
                 remaining_q = LanguagePreferenceParser.strip_language_switch_phrases(user_text)
-                norm_q = SemanticQueryNormalizer.normalize(remaining_q) if remaining_q else None
-                has_domain_intent = norm_q and norm_q.intent != SemanticIntent.GENERAL_INQUIRY
-                clean_rem = remaining_q.lower().strip()
-                is_specific_inquiry = has_domain_intent or any(q in clean_rem for q in [
-                    "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility",
-                    "admission", "admissions", "placement", "placements", "campus", "scholarship", "btech", "mtech",
-                    "b.tech", "m.tech", "mba", "bba", "apply", "how to apply", "offer", "offering", "programs",
-                    "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
-                    "ఎలా", "ఉన్నాయి", "ఉంది", "చెప్పండి", "ఫీస్", "कब", "कितना", "कोर्स", "एडमिशन", "बताइए", "क्या"
-                ]) or (len(clean_rem.split()) >= 3 and any(c in remaining_q for c in "?¿"))
+                is_specific_inquiry = self._check_is_domain_inquiry(session, remaining_q)
 
                 if is_specific_inquiry:
                     # User asked a domain question along with language switch -> route directly to FastQueryRouter/LLM in new language!
@@ -93,16 +84,7 @@ class ConversationManager:
             logger.info(f"Language preference selected: {selected_lang}, proceeding to normal conversation", extra={"session_id": session.session_id})
 
             # Check if user directly asked an inquiry or domain question along with language selection
-            clean = user_text.lower().strip()
-            norm_q = SemanticQueryNormalizer.normalize(user_text)
-            has_domain_intent = norm_q.intent != SemanticIntent.GENERAL_INQUIRY
-            is_specific_inquiry = has_domain_intent or any(q in clean for q in [
-                "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility",
-                "admission", "admissions", "placement", "placements", "campus", "scholarship", "btech", "mtech",
-                "b.tech", "m.tech", "mba", "bba", "apply", "how to apply", "offer", "offering", "programs",
-                "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
-                "ఎలా", "ఉన్నాయి", "ఉంది", "చెప్పండి", "ఫీస్", "कब", "कितना", "कोर्स", "एडमिशन", "बताइए", "क्या"
-            ]) or (len(clean.split()) >= 3 and any(c in user_text for c in "?¿"))
+            is_specific_inquiry = self._check_is_domain_inquiry(session, user_text)
 
             if is_specific_inquiry:
                 # User asked a direct domain question right away -> Let FastQueryRouter / LLM answer immediately!
@@ -114,6 +96,28 @@ class ConversationManager:
             return LANGUAGE_SELECTION_ACKNOWLEDGMENT.get(selected_lang, LANGUAGE_SELECTION_ACKNOWLEDGMENT["en-IN"])
 
         return None
+
+    def _check_is_domain_inquiry(self, session: SessionState, text: str) -> bool:
+        """Check if utterance contains domain-relevant questions based on the active agent template."""
+        if not text:
+            return False
+        clean = text.lower().strip()
+        template_type = getattr(session, "template_type", "education")
+
+        if template_type == "education":
+            norm_q = SemanticQueryNormalizer.normalize(text)
+            has_domain_intent = norm_q and norm_q.intent != SemanticIntent.GENERAL_INQUIRY
+            return has_domain_intent or any(q in clean for q in [
+                "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility",
+                "admission", "admissions", "placement", "placements", "campus", "scholarship", "btech", "mtech",
+                "b.tech", "m.tech", "mba", "bba", "apply", "how to apply", "offer", "offering", "programs",
+                "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
+                "ఎలా", "ఉన్నాయి", "ఉంది", "చెప్పండి", "ఫీస్", "कब", "कितना", "कोर्स", "एडमिशन", "बताइए", "क्या"
+            ]) or (len(clean.split()) >= 3 and any(c in text for c in "?¿"))
+        else:
+            from app.templates.registry import AgentTemplateRegistry
+            template = AgentTemplateRegistry.get_template(template_type)
+            return template.is_domain_query(text) or (len(clean.split()) >= 3 and any(c in text for c in "?¿"))
 
     async def assemble_llm_messages(
         self,
@@ -159,13 +163,13 @@ class ConversationManager:
             except Exception as e:
                 logger.debug(f"[RAG] Retrieve notice: {e}")
 
-        # 3. Build system message
-        system_content = build_admission_system_prompt(
-            institution_name=session.institution_name,
-            agent_name="Priya",
-            language_hint=active_lang,
-            preferred_language=active_lang,
-            verified_context=verified_context
+        # 3. Build system message using the active agent template
+        from app.templates.registry import AgentTemplateRegistry
+        template = AgentTemplateRegistry.get_template(getattr(session, "template_type", "education"))
+        system_content = template.get_system_prompt(
+            session=session,
+            verified_context=verified_context,
+            lang=active_lang
         )
 
         messages = [{"role": "system", "content": system_content}]

@@ -85,16 +85,10 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
         rag = MockRAGProvider()
     else:
         rag = BackendRAGClient(endpoint_url=settings.rag_endpoint, api_key=settings.sarvam_api_key)
-    registry = ToolRegistry()
-    registry.register(GetCoursesTool())
-    registry.register(GetFeeTool())
-    registry.register(GetEligibilityTool())
-    registry.register(GetAdmissionDatesTool())
-    registry.register(GetDocumentsRequiredTool())
-    registry.register(GetHostelInformationTool())
-    registry.register(GetCampusInformationTool())
-    registry.register(CreateLeadTool())
-    registry.register(RequestHumanHandoffTool())
+
+    from app.templates.registry import AgentTemplateRegistry
+    template = AgentTemplateRegistry.get_template(getattr(session, "template_type", "education"))
+    registry = template.get_tool_registry()
 
     conv_manager = ConversationManager(rag_provider=rag, tool_registry=registry)
 
@@ -172,17 +166,38 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                 # 1. session.start
                 if event_type == "session.start":
                     sess_id = payload.get("session_id") or generate_session_id()
+                    call_id = payload.get("call_id")
+                    call_direction = payload.get("call_direction", "inbound")
+                    campaign_id = payload.get("campaign_id")
+                    contact_id = payload.get("contact_id")
                     org_id = payload.get("organization_id", "org_apex_univ")
                     agent_id = payload.get("agent_id", "agent_admission")
                     lang = payload.get("language", "te-IN")
                     sr = int(payload.get("client_sample_rate", 16000))
+                    template_type = payload.get("template_type") or payload.get("template", "education")
+                    biz_name = payload.get("business_name") or payload.get("institution_name", "Apex University")
+                    agent_name = payload.get("agent_name")
+                    greeting_msg = payload.get("greeting_message")
+                    goodbye_msg = payload.get("goodbye_message")
+                    sys_prompt = payload.get("system_prompt")
 
                     session = await manager.create_session(
                         session_id=sess_id,
                         organization_id=org_id,
                         agent_id=agent_id,
+                        call_id=call_id,
+                        call_direction=call_direction,
+                        campaign_id=campaign_id,
+                        contact_id=contact_id,
                         language=lang,
-                        client_sample_rate=sr
+                        client_sample_rate=sr,
+                        template_type=template_type,
+                        business_name=biz_name,
+                        institution_name=biz_name,
+                        agent_name=agent_name,
+                        greeting_message=greeting_msg,
+                        goodbye_message=goodbye_msg,
+                        system_prompt=sys_prompt
                     )
 
                     engine = build_default_engine(session)
@@ -192,6 +207,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({
                         "event": "session.ready",
                         "session_id": sess_id,
+                        "call_id": call_id,
                         "status": "ready"
                     }))
 
@@ -210,19 +226,32 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                 # 3. session.end
                 elif event_type == "session.end":
                     if session:
-                        # Extract intelligence before closing
-                        lead = LeadExtractor.extract_from_messages(session.messages)
-                        summary = CallSummarizer.generate_summary(session.session_id, session.messages, handoff_requested=session.handoff_requested)
+                        from app.templates.registry import AgentTemplateRegistry
+                        template = AgentTemplateRegistry.get_template(getattr(session, "template_type", "education"))
+                        lead = template.extract_lead(session.messages)
+                        summary = template.generate_summary(session.session_id, session.messages, handoff=session.handoff_requested)
                         
                         await websocket.send_text(json.dumps({
                             "event": "lead.extracted",
                             "session_id": session.session_id,
-                            "lead": lead.model_dump()
+                            "call_id": session.call_id,
+                            "organization_id": session.organization_id,
+                            "agent_id": session.agent_id,
+                            "call_direction": session.call_direction,
+                            "campaign_id": session.campaign_id,
+                            "contact_id": session.contact_id,
+                            "lead": lead
                         }))
                         await websocket.send_text(json.dumps({
                             "event": "call.summary",
                             "session_id": session.session_id,
-                            "summary": summary.model_dump()
+                            "call_id": session.call_id,
+                            "organization_id": session.organization_id,
+                            "agent_id": session.agent_id,
+                            "call_direction": session.call_direction,
+                            "campaign_id": session.campaign_id,
+                            "contact_id": session.contact_id,
+                            "summary": summary
                         }))
                     break
 

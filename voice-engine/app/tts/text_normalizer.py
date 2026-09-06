@@ -35,6 +35,11 @@ class SpeechTextNormalizer:
         if not text:
             return text
 
+        # 0. Strip internal reasoning tags and markdown formatting
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        text = re.sub(r'[*_~`#>]', '', text)
+        text = re.sub(r'^\s*[-*•]\s+', '', text, flags=re.MULTILINE)
+
         # 1. Normalize numeric descriptors
         def _replace_descriptor(match: re.Match) -> str:
             num = match.group(1)
@@ -137,26 +142,24 @@ class SpeechTextNormalizer:
             delimiter = m.group(1) or m.group(2) or m.group(3)
 
             if is_first_chunk:
-                # Sentence-ending punctuation: fire immediately on any complete short phrase (>= 3 chars).
-                # e.g. "Yes." "Sure!" "OK." "అవును." "हाँ।" → single Sarvam call, correct.
+                # Sentence-ending punctuation: fire on complete sentences up to 50 chars.
+                # e.g. "Sure, I can help with admissions." (34 chars) -> ONE clean first chunk!
                 is_sentence_end = delimiter in ".!?।\n"
-                # Mid-sentence clause punctuation: require >= 20 chars so that "Yes," (3 chars)
-                # does NOT fire alone when the LLM is already streaming "I can help you...".
-                # This combines e.g. "Yes, I can help" into one first Sarvam call.
                 first_chunk_min = 3 if is_sentence_end else 20
-                if len(candidate) >= first_chunk_min and len(candidate) <= 40 and cls.is_safe_chunk_boundary(candidate):
+                first_chunk_max = 50 if is_sentence_end else 40
+                if len(candidate) >= first_chunk_min and len(candidate) <= first_chunk_max and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
             else:
-                # Non-first chunks: use standard min_chars thresholds.
-                min_boundary_len = min(min_chars, 6) if delimiter in ".!?।\n" else min_chars
+                # Non-first chunks: require at least min_chars (or full sentence end)
+                min_boundary_len = min(min_chars, 20) if delimiter in ".!?।\n" else min_chars
                 if len(candidate) >= min_boundary_len and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
 
-        # 1b. For the very first chunk without early punctuation, if buffer reaches 20-30 chars, emit at word boundary
+        # 1b. Fallback: if buffer reaches 20+ chars without early punctuation, emit at word boundary (<= 35 chars)
         if is_first_chunk and len(working_buffer) >= 20:
-            first_slice = working_buffer[:32]
+            first_slice = working_buffer[:35]
             space_matches = list(re.finditer(r'\s+', first_slice))
             if space_matches:
                 for sm in reversed(space_matches):
