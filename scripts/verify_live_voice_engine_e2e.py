@@ -54,12 +54,17 @@ async def main() -> bool:
 
     start_payload = SessionStartPayload(
         session_id=session_id,
-        metadata=metadata,
-        agent_config={
-            "agent_id": "agent_admissions_01",
-            "language": "te-IN",
-            "voice": "priya_telugu",
-        },
+        call_id=call_id,
+        organization_id="org_gentechs_test",
+        agent_id="agent_admissions_01",
+        call_direction="outbound",
+        campaign_id="camp_admissions_2026",
+        contact_id="cnt_parent_9876",
+        template_type="admissions_followup",
+        business_name="Greenwood High School",
+        agent_name="Priya",
+        language="te-IN",
+        client_sample_rate=16000,
     )
 
     audio_chunks_received = 0
