@@ -1,0 +1,176 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - develop
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  TELEPHONY_WEBHOOK_SECRET: "ci_test_secret_key_12345"
+  TELEPHONY_SESSION_TIMEOUT_SECONDS: "300"
+  TELEPHONY_MAX_SESSION_DURATION_SECONDS: "600"
+  TELEPHONY_MAX_ACTIVE_SESSIONS: "100"
+  TELEPHONY_RATE_LIMIT_ENABLED: "false"
+
+jobs:
+  lint-and-test:
+    name: Lint, Type Check & Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Security Check - Verify No Sensitive Files Tracked
+        run: |
+          echo "Checking repository for unintended secrets or .env files..."
+          if git ls-files | grep -E "(^\.env|\.pem$|\.key$|id_rsa)"; then
+            echo "ERROR: Potential secret or .env file found in tracked git index!"
+            exit 1
+          fi
+          echo "Repository file index is clean."
+
+      - name: Run Ruff Linter
+        run: |
+          ruff check .
+
+      - name: Run Mypy Type Checker
+        run: |
+          mypy backend tests
+
+      - name: Run Pytest Test Suite
+        run: |
+          pytest -v
+
+  docker-build-and-validate:
+    name: Docker Build & Container Validation
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker Layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build Production Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: edu-voice-ai-gateway:ci
+          load: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Move Docker Cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
+
+      - name: Inspect Docker Image Configuration
+        run: |
+          echo "Verifying non-root user in Docker image metadata..."
+          IMAGE_USER=$(docker inspect --format='{{ .Config.User }}' edu-voice-ai-gateway:ci)
+          echo "Configured Image User: $IMAGE_USER"
+          if [ "$IMAGE_USER" != "appuser" ] && [ "$IMAGE_USER" != "10001" ]; then
+            echo "ERROR: Production image is not configured to run as non-root user 'appuser'!"
+            exit 1
+          fi
+
+      - name: Start Gateway Container for Runtime Verification
+        run: |
+          docker run -d --name gateway-ci-container \
+            -p 8000:8000 \
+            -e TELEPHONY_WEBHOOK_SECRET=ci_test_secret_key_12345 \
+            -e TELEPHONY_RATE_LIMIT_ENABLED=false \
+            edu-voice-ai-gateway:ci
+
+      - name: Verify Container Health & Endpoints
+        run: |
+          echo "Waiting for container to accept connections..."
+          for i in {1..15}; do
+            if curl -sf http://127.0.0.1:8000/health > /dev/null 2>&1; then
+              echo "Gateway container is responding on /health!"
+              break
+            fi
+            echo "Waiting for gateway startup... (attempt $i/15)"
+            sleep 2
+          done
+
+          echo "--- Probing /health endpoint ---"
+          HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/health)
+          if [ "$HEALTH_STATUS" != "200" ]; then
+            echo "ERROR: /health returned HTTP $HEALTH_STATUS, expected 200"
+            docker logs gateway-ci-container
+            exit 1
+          fi
+
+          echo "--- Probing /ready endpoint ---"
+          READY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/ready)
+          if [ "$READY_STATUS" != "200" ]; then
+            echo "ERROR: /ready returned HTTP $READY_STATUS, expected 200"
+            docker logs gateway-ci-container
+            exit 1
+          fi
+
+          echo "--- Probing /metrics endpoint ---"
+          METRICS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/metrics)
+          if [ "$METRICS_STATUS" != "200" ]; then
+            echo "ERROR: /metrics returned HTTP $METRICS_STATUS, expected 200"
+            docker logs gateway-ci-container
+            exit 1
+          fi
+
+          echo "All runtime probes (/health, /ready, /metrics) succeeded with HTTP 200."
+
+      - name: Verify Container Runtime User (Non-Root)
+        run: |
+          CONTAINER_UID=$(docker exec gateway-ci-container id -u)
+          echo "Runtime Container UID: $CONTAINER_UID"
+          if [ "$CONTAINER_UID" != "10001" ]; then
+            echo "ERROR: Container runtime UID is $CONTAINER_UID, expected 10001 (appuser)"
+            exit 1
+          fi
+          echo "Verified: Container is executing as non-root user (UID: 10001)."
+
+      - name: Graceful Container Teardown
+        if: always()
+        run: |
+          echo "Stopping container gracefully..."
+          docker stop -t 10 gateway-ci-container || true
+          docker rm gateway-ci-container || true
+          echo "Container stopped and removed."

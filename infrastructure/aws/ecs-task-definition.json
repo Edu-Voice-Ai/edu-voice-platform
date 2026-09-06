@@ -1,0 +1,103 @@
+{
+  "family": "edu-voice-ai-gateway",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/eduVoiceAiGatewayTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "gateway",
+      "image": "<AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/edu-voice-ai-gateway:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "hostPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "ENVIRONMENT",
+          "value": "production"
+        },
+        {
+          "name": "PORT",
+          "value": "8000"
+        },
+        {
+          "name": "BACKEND_INTERNAL_URL",
+          "value": "http://backend.internal:8000"
+        },
+        {
+          "name": "DID_RESOLVE_TIMEOUT_MS",
+          "value": "2000"
+        },
+        {
+          "name": "TELEPHONY_MAX_ACTIVE_SESSIONS",
+          "value": "500"
+        },
+        {
+          "name": "TELEPHONY_MAX_AUDIO_QUEUE_SIZE",
+          "value": "100"
+        },
+        {
+          "name": "TELEPHONY_SESSION_TIMEOUT_SECONDS",
+          "value": "1800"
+        },
+        {
+          "name": "TELEPHONY_MAX_SESSION_DURATION_SECONDS",
+          "value": "3600"
+        },
+        {
+          "name": "TELEPHONY_RATE_LIMIT_CONNECTIONS_PER_MIN",
+          "value": "60"
+        },
+        {
+          "name": "TELEPHONY_WS_PING_INTERVAL_SECONDS",
+          "value": "20"
+        },
+        {
+          "name": "TELEPHONY_WS_PING_TIMEOUT_SECONDS",
+          "value": "10"
+        },
+        {
+          "name": "TELEPHONY_SIGNATURE_VERIFICATION_ENABLED",
+          "value": "true"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "TELEPHONY_WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:<AWS_REGION>:<AWS_ACCOUNT_ID>:secret:edu-voice-ai/telephony/webhook_secret"
+        },
+        {
+          "name": "INTERNAL_SERVICE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:<AWS_REGION>:<AWS_ACCOUNT_ID>:secret:edu-voice-ai/backend/internal_service_key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/edu-voice-ai-gateway",
+          "awslogs-region": "<AWS_REGION>",
+          "awslogs-stream-prefix": "gateway"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      }
+    }
+  ]
+}

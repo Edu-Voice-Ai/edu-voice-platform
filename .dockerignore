@@ -1,0 +1,61 @@
+# ==============================================================================
+# Edu-Voice-AI — Docker Build Ignore Rules
+# ==============================================================================
+
+# Version Control
+.git/
+.gitignore
+.gitattributes
+
+# Python Bytecode & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Linting
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+tests/
+
+# Environment Variables & Secrets (CRITICAL: NEVER BAKE SECRETS)
+.env
+.env.*
+!.env.example
+
+# IDE & Editor Metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation & Scratch
+docs/
+scratch/
+brain/
+*.md
+!README.md
