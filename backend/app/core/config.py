@@ -39,8 +39,8 @@ class Settings(BaseSettings):
         raise ValueError(v)
 
     # 2. Supabase PostgreSQL & Authentication (Server Secrets)
-    SUPABASE_URL: str = "https://placeholder.supabase.co"
-    SUPABASE_ANON_KEY: str = "placeholder_anon_key"
+    SUPABASE_URL: str = "https://ccydagfljcdnkkobyhwx.supabase.co"
+    SUPABASE_ANON_KEY: str = "sb_publishable_8lvXhuJamTZ2xmlwCulnTw_N8q2mdLq"
     SUPABASE_SERVICE_ROLE_KEY: str = "placeholder_service_role_key"
     SUPABASE_JWT_SECRET: str = "placeholder_jwt_secret"
 
