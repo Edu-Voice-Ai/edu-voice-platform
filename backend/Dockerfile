@@ -23,9 +23,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend application source code and SQL migrations
+# Copy backend application source code, SQL migrations, and scripts
 COPY backend/app /app/app
 COPY backend/migrations /app/migrations
+COPY backend/scripts /app/scripts
 
 # Expose FastAPI service port
 EXPOSE 8000
