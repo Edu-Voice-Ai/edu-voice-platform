@@ -123,7 +123,8 @@ BEGIN
         'exotel',
         'IN',
         'active'
-    ) ON CONFLICT (phone_number) DO UPDATE SET
+    ) ON CONFLICT (id) DO UPDATE SET
+        phone_number = EXCLUDED.phone_number,
         organization_id = EXCLUDED.organization_id,
         status = 'active';
 
