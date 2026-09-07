@@ -231,6 +231,8 @@ async def exotel_dynamic_resolver(
         or params.get("CallFrom")
         or params.get("From")
         or params.get("from")
+        or params.get("Caller")
+        or params.get("caller")
         or "anonymous"
     )
     resolved_to = (
@@ -241,6 +243,10 @@ async def exotel_dynamic_resolver(
         or params.get("CallTo")
         or params.get("DialWhomNumber")
         or params.get("to")
+        or params.get("ExoPhone")
+        or params.get("exophone")
+        or params.get("Called")
+        or params.get("called")
         or settings.exotel_exophone
         or ""
     )

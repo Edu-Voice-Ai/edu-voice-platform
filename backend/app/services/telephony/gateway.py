@@ -45,6 +45,7 @@ from backend.app.services.telephony.logging import (
 )
 from backend.app.services.telephony.metrics import GatewayMetrics, get_gateway_metrics
 from backend.app.services.telephony.realtime_session import (
+    CallSessionState,
     ConnectionState,
     RealtimeVoiceSession,
 )
@@ -318,7 +319,9 @@ class WebSocketAudioGateway:
                     )
 
             session.active_websocket = None
-            session.connection_state = ConnectionState.DISCONNECTED
+            session.connection_state = ConnectionState.CLOSED
+            session.lifecycle_state = CallSessionState.DISCONNECTED
+            session.drain_outbound_queue()
 
             # If client is still connected, close cleanly
             if websocket.client_state == WebSocketState.CONNECTED:
@@ -713,9 +716,11 @@ class WebSocketAudioGateway:
                 if session.cancellation_event.is_set():
                     break
 
-                # Send active server ping
-                ping = InternalAudioMessage(type=FrameType.PING)
-                await websocket.send_text(ping.to_json_str())
+                # Send active server ping only for generic / simulator clients.
+                # Exotel AgentStream protocol is strictly audio/clear envelopes; arbitrary JSON pings are not accepted.
+                if session.provider != "exotel" and not session.stream_sid:
+                    ping = InternalAudioMessage(type=FrameType.PING)
+                    await websocket.send_text(ping.to_json_str())
 
             except asyncio.CancelledError:
                 break
