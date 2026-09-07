@@ -42,6 +42,23 @@ try:
         "seed_initial_data.sql",
     ]
 
+    # Ensure legacy tables without organization_id are safely renamed
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'leads'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_schema = 'public' AND table_name = 'leads' AND column_name = 'organization_id'
+            ) THEN
+                ALTER TABLE public.leads RENAME TO leads_legacy_backup;
+                RAISE NOTICE 'Renamed old leads table to leads_legacy_backup';
+            END IF;
+        END $$;
+    """)
+
     for mf in migration_files:
         fpath = MIGRATIONS_DIR / mf
         if not fpath.exists():
@@ -52,8 +69,22 @@ try:
         with open(fpath, "r", encoding="utf-8") as f:
             sql_content = f.read()
 
+        # Handle idempotency for triggers: DROP TRIGGER IF EXISTS before CREATE TRIGGER
+        # Match pattern: CREATE TRIGGER <name> ... ON <table_name>
+        import re
+        
+        # Replace CREATE TRIGGER with CREATE OR REPLACE TRIGGER (Postgres 14+)
+        modified_sql = re.sub(r'\bCREATE\s+TRIGGER\b', 'CREATE OR REPLACE TRIGGER', sql_content, flags=re.IGNORECASE)
+        
+        # For policies in 00008: DROP POLICY IF EXISTS before CREATE POLICY
+        if "00008" in mf:
+            # Pattern: CREATE POLICY "name" ON table
+            policy_matches = re.findall(r'CREATE\s+POLICY\s+"([^"]+)"\s+ON\s+([^\s]+)', modified_sql, re.IGNORECASE)
+            drop_statements = "\n".join([f'DROP POLICY IF EXISTS "{p[0]}" ON {p[1]};' for p in policy_matches])
+            modified_sql = drop_statements + "\n" + modified_sql
+
         try:
-            cursor.execute(sql_content)
+            cursor.execute(modified_sql)
             print(f"  -> {mf} executed successfully.")
         except Exception as e:
             print(f"  -> Error executing {mf}: {e}")
