@@ -36,7 +36,7 @@ BEGIN
         'https://apexcollege.edu.in',
         'Asia/Kolkata',
         'Director Admissions',
-        '+918047361234',
+        '+912249360001',
         'admissions@apexcollege.edu.in',
         '{"city": "Bengaluru", "state": "Karnataka", "country": "India", "pincode": "560100"}'::jsonb,
         TRUE
@@ -119,7 +119,7 @@ BEGIN
     ) VALUES (
         v_phone_id,
         v_org_id,
-        '+918047361234',
+        '+912249360001',
         'exotel',
         'IN',
         'active'
@@ -195,5 +195,5 @@ BEGIN
         '{"topic": "admissions_timeline"}'::jsonb
     ) ON CONFLICT (document_id, chunk_index) DO NOTHING;
 
-    RAISE NOTICE 'Seed completed successfully for Apex Engineering College (DID: +918047361234, Agent: Maya)';
+    RAISE NOTICE 'Seed completed successfully for Apex Engineering College (DID: +912249360001, Agent: Maya)';
 END $$;

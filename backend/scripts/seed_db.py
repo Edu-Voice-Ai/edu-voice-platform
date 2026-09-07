@@ -50,7 +50,7 @@ async def seed_database():
         async with engine.connect() as conn:
             org_res = await conn.execute(text("SELECT name FROM public.organizations WHERE slug = 'apex-college'"))
             agent_res = await conn.execute(text("SELECT name FROM public.agents WHERE name LIKE 'Maya%'"))
-            phone_res = await conn.execute(text("SELECT phone_number, status FROM public.phone_numbers WHERE phone_number = '+918047361234'"))
+            phone_res = await conn.execute(text("SELECT phone_number, status FROM public.phone_numbers WHERE phone_number = '+912249360001'"))
 
             org = org_res.scalar()
             agent = agent_res.scalar()
