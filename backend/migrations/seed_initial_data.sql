@@ -22,10 +22,11 @@ BEGIN
         slug,
         institution_type,
         website,
-        phone,
-        email,
+        timezone,
+        primary_contact_name,
+        primary_contact_phone,
+        primary_contact_email,
         address,
-        settings,
         is_active
     ) VALUES (
         v_org_id,
@@ -33,10 +34,11 @@ BEGIN
         'apex-college',
         'college',
         'https://apexcollege.edu.in',
+        'Asia/Kolkata',
+        'Director Admissions',
         '+918047361234',
         'admissions@apexcollege.edu.in',
         '{"city": "Bengaluru", "state": "Karnataka", "country": "India", "pincode": "560100"}'::jsonb,
-        '{"theme": "dark", "locale": "en-IN"}'::jsonb,
         TRUE
     ) ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
