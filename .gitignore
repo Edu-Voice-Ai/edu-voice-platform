@@ -1,84 +1,105 @@
-# Node.js & Frontend
-logs
+# ==============================================================================
+# Edu-Voice-Ai Platform — Unified .gitignore
+# ==============================================================================
+
+# 1. Logs & Diagnostics
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
-
-# Diagnostic reports
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
-# Runtime data
+# 2. Runtime & Lock files
 pids
 *.pid
 *.seed
 *.pid.lock
 
-# Coverage & Tests
-coverage
-*.lcov
-.nyc_output
-.coverage
-htmlcov/
-.pytest_cache/
-**/.pytest_cache/
-
-# Dependencies
+# 3. Dependencies
 node_modules/
 jspm_packages/
 web_modules/
 bower_components/
+.pnpm-store
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
 
-# TypeScript & Build Caches
-*.tsbuildinfo
-.npm
-.eslintcache
-.stylelintcache
-.cache
-.parcel-cache
-
-# Next.js & Frontend Builds
-.next
-out
+# 4. Frontend & Build Outputs
+.next/
+out/
 dist/
 build/
-.output
+.output/
+.cache/
+.parcel-cache/
+.vite/
+*.tsbuildinfo
+.npm/
+.eslintcache
+.stylelintcache
 
-# Python & Environment
+# 5. Python & Virtual Environments
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+develop-eggs/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+.installed.cfg
+
+.venv/
+**/.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# 6. Testing & Coverage Caches
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+coverage/
+*.lcov
+.nyc_output/
+.coverage
+htmlcov/
+
+# 7. Environment Variables & Secrets (CRITICAL)
 .env
 .env.*
 **/.env
 **/.env.*
 !.env.example
 !**/.env.example
-__pycache__/
-**/__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-.venv/
-**/.venv/
-env/
-venv/
-
-# IDEs & System
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# Certificates, Keys & Secrets
 *.pem
 **/*.pem
 *.key
 **/*.key
 *.crt
 **/*.crt
+*.cert
+**/*.cert
 *.secret
 **/*.secret
 secrets/
@@ -87,3 +108,13 @@ credentials/
 **/credentials/
 *.tar.gz
 
+# 8. IDE & Operating System
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
