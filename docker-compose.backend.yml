@@ -1,0 +1,29 @@
+# ==============================================================================
+# Edu-Voice-Ai Backend — Docker Compose Deployment
+# Connects Backend container directly to the shared yasin-gateway_default network
+# ==============================================================================
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: edu-voice-ai-backend:prod
+    container_name: edu-voice-ai-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8000"
+    env_file:
+      - backend/.env
+    networks:
+      - yasin-gateway_default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  yasin-gateway_default:
+    external: true

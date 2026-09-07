@@ -98,7 +98,7 @@ async def resolve_did(
         )
         result = await db.execute(stmt)
         phone = result.scalar_one_or_none()
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, OSError) as exc:
         logger.error(f"Database error during DID resolution for '{normalized_number}': {exc}")
         raise AppException(
             message="Authoritative database is currently unavailable. Please retry shortly.",
