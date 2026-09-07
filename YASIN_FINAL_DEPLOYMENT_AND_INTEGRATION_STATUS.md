@@ -22,9 +22,8 @@
 | **Cloudflare Tunnel Ingress** | **PASS** | Public `https://gateway.gentechs.in/health` & `/ready` return HTTP 200 |
 | **Public Exotel WSS Protocol** | **PASS** | `scripts/test_public_wss.py` passed through Cloudflare (282 media frames returned) |
 | **Lokesh Voice Engine Transport** | **PASS** | Tested from inside AWS container: `session.start` $\to$ `session.ready` $\to$ 282 audio chunks $\to$ `session.end` |
-| **Persistent Idempotency Volume** | **PASS** | Host mount `./data:/app/data` mounted with 777 permissions for non-root SQLite |
+| **Outbound Calling (Contracts 01-05)** | **REVERTED** | Unapproved outbound implementation removed; Gateway strictly owns Inbound Telephony |
 | **Aravind DID Resolution API** | **BLOCKED** | `POST /api/v1/internal/telephony/resolve-did` returned HTTP 404 (Aravind not deployed) |
-| **Aravind Outbound Status Callback** | **BLOCKED** | `POST /api/v1/internal/telephony/outbound-calls/{call_id}/status` returned HTTP 404 (Aravind not deployed) |
 | **Controlled Real Carrier Call** | **NOT TESTED** | Single controlled PSTN handset call to `022-493-60001` pending team coordination |
 
 ---
@@ -32,21 +31,20 @@
 ## 2. Detailed Audit & Verification Results
 
 ### 2.1 Git Repository & Local Quality Gates
-- **Branch:** `develop`
-- **Deployed Commit:** `7230e29`
-- **Commit Message:** `feat(gateway): implement frozen v1 outbound contracts and voice engine integration`
+- **Branch:** `revert/unapproved-outbound-calling`
+- **Revert Scope:** All unapproved outbound calling code reverted; clean inbound telephony architecture restored.
 - **Secrets Audit:** Verified that `.gitignore` strictly ignores `.env`, `*.pem`, `*.key`, `data/`, and `*.db`. Zero secrets tracked or committed.
 - **Automated Validation:**
-  - `pytest`: **156 passed, 0 failed** in 25.96s
-  - `ruff check .`: **All checks passed (0 errors)**
-  - `mypy .`: **Success: no issues found in 71 source files**
+  - `pytest`: **167 passed, 0 failed** (100% pass)
+  - `ruff check backend tests`: **All checks passed (0 errors)**
+  - `mypy backend`: **Success: no issues found in 41 source files**
 
 ### 2.2 Docker Production Build
 - **Target Image:** `edu-voice-ai-gateway:prod`
 - **Builder Stage:** Python 3.12-slim-bookworm multi-stage build.
 - **Runtime User:** Dedicated system user `appuser` (`UID 10001`, `GID 10001`). Confirmed via `docker top`: process runs under UID 10001.
 - **Container Port Isolation:** Port 8000 is bound strictly to `127.0.0.1:8000` (`- 127.0.0.1:8000:8000`). No raw container ports are exposed to the public internet.
-- **Persistence:** Volume mount `./data:/app/data` mapped to preserve SQLite idempotency store across container restarts.
+- **Stateless Runtime:** Outbound SQLite persistence volume removed from compose configuration.
 
 ### 2.3 AWS Server Deployment
 - **Host:** AWS EC2 instance `3.105.228.104` (`ip-172-31-14-240`), Linux 7.0.0-1006-aws x86_64.
@@ -83,21 +81,8 @@ Executed `scripts/test_public_wss.py` over the public internet:
 ### 2.6 Live Voice Engine Integration Verification
 Executed `scripts/verify_live_voice_engine_e2e.py` from inside the live production container on AWS (`sudo docker exec edu-voice-ai-gateway python /app/scripts/verify_live_voice_engine_e2e.py`):
 - **Target URL:** `wss://voice-test.gentechs.in/ws/voice`
-- **Outbound Metadata Contract (Contract 5):**
-  - `session_id`: `sess_92c2ba731c70`
-  - `call_id`: `call_outbound_verify_1108d201`
-  - `organization_id`: `org_gentechs_test`
-  - `agent_id`: `agent_admissions_01`
-  - `call_direction`: `outbound`
-  - `campaign_id`: `camp_admissions_2026`
-  - `contact_id`: `cnt_parent_9876`
-  - `template_type`: `admissions_followup`
-  - `business_name`: `Greenwood High School`
-  - `agent_name`: `Priya`
-  - `language`: `te-IN`
-  - `client_sample_rate`: `16000`
-- **Protocol Flow:**
-  - `session.start` sent $\to$ `session.ready` confirmed in <150ms
+- **Inbound Protocol Flow:**
+  - `session.start` sent with verified tenant identity $\to$ `session.ready` confirmed in <150ms
   - Streamed 10 frames of 16kHz PCM16 speech audio
   - Received 282 chunks of streaming audio output (640 bytes each)
   - Sent `session.end` $\to$ Clean teardown
@@ -108,11 +93,7 @@ Executed `scripts/verify_live_voice_engine_e2e.py` from inside the live producti
    - Configured URL: `BACKEND_INTERNAL_URL=http://localhost:8000`
    - Tested endpoint: `http://127.0.0.1:8000/api/v1/internal/telephony/resolve-did` with `X-Internal-Service-Key`
    - HTTP Response: **HTTP 404 Not Found**
-   - Status: **BLOCKED — WAITING FOR ARAVIND** (Aravind has not deployed this internal route yet; Gateway falls back to default agent config).
-2. **Outbound Status Callback (`POST /api/v1/internal/telephony/outbound-calls/{call_id}/status`):**
-   - Tested endpoint: `http://127.0.0.1:8000/api/v1/internal/telephony/outbound-calls/{call_id}/status`
-   - HTTP Response: **HTTP 404 Not Found**
-   - Status: **BLOCKED — WAITING FOR ARAVIND** (Aravind has not deployed this callback consumer yet; Gateway queues/logs callback attempts safely without crashing).
+   - Status: **BLOCKED — WAITING FOR ARAVIND** (Aravind has not deployed this internal route yet; Gateway strictly blocks unverified DIDs with HTTP 422 to protect tenant isolation).
 
 ---
 
@@ -142,7 +123,7 @@ sudo docker logs -f --tail 100 edu-voice-ai-gateway
 | **Lokesh Voice Engine transport** | **VERIFIED** |
 | **AWS / Cloudflare deployment** | **PASS — VERIFIED ON DEPLOYED PRODUCTION** |
 | **Aravind DID database integration** | **BLOCKED — WAITING FOR ARAVIND** |
-| **Aravind outbound status callback** | **BLOCKED — WAITING FOR ARAVIND** |
+| **Outbound Calling (Contracts 01-05)** | **REVERTED — NOT APPROVED** |
 | **Real Exotel handset call** | **PENDING** |
 
 ---
@@ -150,7 +131,7 @@ sudo docker logs -f --tail 100 edu-voice-ai-gateway
 ## 5. Remaining Blockers & Next Actions
 
 1. **Blocker B-1 (External - Aravind Backend):**
-   - Aravind needs to deploy `POST /api/v1/internal/telephony/resolve-did` and `POST /api/v1/internal/telephony/outbound-calls/{call_id}/status` on the internal network and update `BACKEND_INTERNAL_URL` if hosted on a separate host/port.
+   - Aravind needs to deploy `POST /api/v1/internal/telephony/resolve-did` on the internal network and update `BACKEND_INTERNAL_URL` if hosted on a separate host/port.
 2. **Blocker B-2 (Physical Telecom Verification):**
    - Perform exactly **ONE controlled physical PSTN call** from a mobile handset to ExoPhone `022-493-60001`.
    - Tail container logs during the call:

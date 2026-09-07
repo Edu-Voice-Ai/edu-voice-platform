@@ -705,8 +705,8 @@ async def test_concurrent_isolated_voice_engine_sessions() -> None:
         s1 = "sess_concurrent_1"
         s2 = "sess_concurrent_2"
 
-        c1 = await transport.initialize_session(session_id=s1, organization_id="org_1")
-        c2 = await transport.initialize_session(session_id=s2, organization_id="org_2")
+        c1 = await transport.initialize_session(session_id=s1, organization_id="org_1", agent_id="agent_1")
+        c2 = await transport.initialize_session(session_id=s2, organization_id="org_2", agent_id="agent_2")
 
         assert c1.session_id == s1
         assert c2.session_id == s2

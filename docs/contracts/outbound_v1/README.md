@@ -1,6 +1,12 @@
-# Edu-Voice-Ai — Five Frozen V1 Outbound Contracts
+# Edu-Voice-Ai — Five Outbound Contracts (Architectural Proposals)
 
-These are the five contracts to freeze before implementation:
+> [!WARNING]
+> **STATUS: NOT APPROVED / REVIEW ONLY / NOT IMPLEMENTED**
+> These contracts were shared for technical review, gap identification, and boundary freezing only.
+> They are **NOT** approved implementation instructions and are **NOT** implemented in the Voice Gateway.
+> All unauthorized outbound implementations have been reverted.
+
+These are the five contract proposals shared for review:
 
 1. Backend → Yasin outbound API
 2. Outbound job/call ID + idempotency

@@ -59,9 +59,6 @@ class RealtimeSessionManager:
         to_number: str | None = None,
         call_direction: str | None = None,
         provider_metadata: dict[str, Any] | None = None,
-        outbound_job_id: str | None = None,
-        campaign_id: str | None = None,
-        contact_id: str | None = None,
         call_id: str | None = None,
     ) -> RealtimeVoiceSession:
         """Create and register a new RealtimeVoiceSession in a thread-safe manner."""
@@ -102,9 +99,6 @@ class RealtimeSessionManager:
                 to_number=to_number,
                 call_direction=call_direction,
                 provider_metadata=provider_metadata,
-                outbound_job_id=outbound_job_id,
-                campaign_id=campaign_id,
-                contact_id=contact_id,
                 call_id=call_id,
             )
             self._sessions[session_id] = session
@@ -275,6 +269,10 @@ class RealtimeSessionManager:
         """Return number of active registered sessions."""
         async with self._lock:
             return len(self._sessions)
+
+    def get_all_sessions(self) -> dict[str, RealtimeVoiceSession]:
+        """Return shallow copy of all registered sessions."""
+        return dict(self._sessions)
 
     async def close_all(self, reason: str = "server_shutdown") -> None:
         """Close and cleanup all tracked sessions on server shutdown."""

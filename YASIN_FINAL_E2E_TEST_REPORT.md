@@ -38,12 +38,12 @@
 | **24** | Backend unavailable | Pytest | **PASS — verified locally** | `test_backend_phone_assignment_resolver.py::test_database_unavailable_503` |
 | **25** | Backend timeout | Pytest | **PASS — verified locally** | `test_backend_phone_assignment_resolver.py::test_backend_timeout` |
 | **26** | Tenant isolation | Pytest | **PASS — verified locally** | `test_integration_contracts.py::test_cross_tenant_security_access_violation` |
-| **27** | Outbound API | Pytest | **PASS — verified locally** | `test_outbound_contracts.py::test_outbound_call_request_success` |
-| **28** | Outbound idempotency | Pytest | **PASS — verified locally** | `test_outbound_contracts.py::test_idempotency_duplicate_request_returns_existing_mapping` |
-| **29** | Idempotency after restart | Pytest | **PASS — verified locally** | `test_outbound_contracts.py::test_idempotency_persistence_across_restart` |
-| **30** | Authorized caller ID | Pytest | **PASS — verified locally** | `test_outbound_contracts.py::test_authorized_caller_id_forwarded_to_provider` |
-| **31** | All outbound statuses | Pytest | **PASS — verified locally** | `test_outbound_contracts.py::test_canonical_statuses_and_terminal_detection` |
-| **32** | Backend status callback | Pytest / Target | **PASS — verified locally** | Dispatches to `POST /api/v1/internal/telephony/outbound-calls/{call_id}/status`. *(Live receiver: BLOCKED — waiting for Aravind)* |
+| **27** | Outbound API | Pytest | **REVERTED** | Unapproved Outbound Contract 01 removed |
+| **28** | Outbound idempotency | Pytest | **REVERTED** | Unapproved Outbound Contract 02 removed |
+| **29** | Idempotency after restart | Pytest | **REVERTED** | Unapproved Outbound SQLite persistence removed |
+| **30** | Authorized caller ID | Pytest | **REVERTED** | Unapproved Outbound Contract 03 removed |
+| **31** | All outbound statuses | Pytest | **REVERTED** | Unapproved Outbound Contract 04 removed |
+| **32** | Backend status callback | Pytest / Target | **REVERTED** | Unapproved Outbound status callback client removed |
 | **33** | Voice Engine handshake | Live Probe | **PASS — verified against deployed service** | Probed `wss://voice-test.gentechs.in/ws/voice` with `session.start` |
 | **34** | Session.ready | Live Probe | **PASS — verified against deployed service** | Live Engine responded `{"event": "session.ready", "status": "ready"}` |
 | **35** | Audio.output | Pytest | **PASS — verified locally** | `test_voice_engine_transport.py::test_voice_engine_audio_output_decoding` |
@@ -68,7 +68,6 @@
 |---|---|:---:|---|
 | **Carrier Telephony** | Exotel PSTN Trunk Dialing | **BLOCKED — requires real Exotel call** | Awaiting manual mobile phone call test (trial credit preserved) |
 | **Backend DID** | `POST /api/v1/internal/telephony/resolve-did` | **BLOCKED — waiting for Aravind** | Requires Aravind's FastAPI service deployment with Supabase |
-| **Backend Status** | `POST /api/v1/internal/telephony/outbound-calls/{call_id}/status` | **BLOCKED — waiting for Aravind** | Requires Aravind's callback receiver deployment |
 | **Voice Engine** | `wss://voice-test.gentechs.in/ws/voice` | **PASS — verified against deployed service** | Handshake verified live; acoustic test awaiting real call |
 
 ---
@@ -80,24 +79,24 @@
 platform win32 -- Python 3.12.0, pytest-9.1.1, pluggy-1.6.0
 rootdir: C:\Anti Gravity\P-1
 plugins: anyio-4.14.2, asyncio-1.4.0
-collected 156 items
+collected 167 items
 
-tests/test_backend_phone_assignment_resolver.py .............            [  8%]
-tests/test_exotel_agentstream.py ...............                         [ 17%]
-tests/test_exotel_integration.py ............                            [ 25%]
-tests/test_gateway_hardening.py ............                             [ 33%]
-tests/test_health.py .                                                   [ 33%]
-tests/test_integration_contracts.py ......                               [ 37%]
-tests/test_outbound_contracts.py ............                            [ 45%]
-tests/test_provider_abstraction.py .............                         [ 53%]
-tests/test_realtime_gateway.py ........                                  [ 58%]
-tests/test_realtime_session.py ..........                                [ 65%]
-tests/test_security_sanitization.py ..                                   [ 66%]
-tests/test_telephony_router.py ......                                    [ 70%]
-tests/test_telephony_sandbox_e2e.py ................                     [ 80%]
-tests/test_voice_engine_transport.py ................                    [ 91%]
-tests/test_webhook_security.py ........                                  [ 96%]
+tests/test_backend_phone_assignment_resolver.py .............            [  7%]
+tests/test_did_security_rejection.py ...........                         [ 14%]
+tests/test_exotel_agentstream.py ...............                         [ 23%]
+tests/test_exotel_integration.py ............                            [ 30%]
+tests/test_gateway_hardening.py ............                             [ 37%]
+tests/test_health.py .                                                   [ 38%]
+tests/test_integration_contracts.py ......                               [ 41%]
+tests/test_provider_abstraction.py .............                         [ 49%]
+tests/test_realtime_gateway.py ........                                  [ 54%]
+tests/test_realtime_session.py ..........                                [ 60%]
+tests/test_security_sanitization.py ..                                   [ 61%]
+tests/test_telephony_router.py ......                                    [ 65%]
+tests/test_telephony_sandbox_e2e.py ................                     [ 75%]
+tests/test_voice_engine_transport.py ..................................  [ 95%]
+tests/test_webhook_security.py ........                                  [100%]
 tests/test_webhook_validation.py ......                                  [100%]
 
-====================== 156 passed, 4 warnings in 24.90s =======================
+====================== 167 passed in 23.4s =======================
 ```

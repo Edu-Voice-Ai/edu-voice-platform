@@ -211,29 +211,46 @@ class WebSocketAudioGateway:
             async def on_response_end(evt: Any) -> None:
                 session.response_latencies = getattr(evt, "data", None)
 
-            try:
-                ve_client = await self.voice_engine_transport.initialize_session(
+            # Security check: Voice Engine initialization is permitted ONLY if organization_id and agent_id are authoritative
+            org = (session.organization_id or "").strip()
+            agt = (session.agent_id or "").strip()
+            if (
+                not org
+                or not agt
+                or org in ("pending_contract_org", "unknown", "default")
+                or agt in ("pending_contract_admission_agent", "unknown", "default")
+                or org.startswith("pending_")
+                or agt.startswith("pending_")
+            ):
+                slog.warning(
+                    "voice_engine_init_blocked_unresolved_identity",
                     session_id=session_id,
-                    outbound_queue=session.outbound_audio_queue,
                     organization_id=session.organization_id,
                     agent_id=session.agent_id,
-                    agent_config=session.agent_config,
-                    call_id=session.call_id or session.call_sid,
-                    call_direction=session.call_direction or "inbound",
-                    campaign_id=session.campaign_id,
-                    contact_id=session.contact_id,
-                    on_response_cancelled=on_response_cancelled,
-                    on_lead_extracted=on_lead_extracted,
-                    on_call_summary=on_call_summary,
-                    on_response_end=on_response_end,
+                    reason="Voice Engine session rejected: tenant identity is missing or unverified",
                 )
-                session.voice_engine_client = ve_client
-            except (GatewayError, OSError, RuntimeError) as ve_init_err:
-                slog.warning(
-                    "voice_engine_transport_init_failed",
-                    session_id=session_id,
-                    error=str(ve_init_err),
-                )
+            else:
+                try:
+                    ve_client = await self.voice_engine_transport.initialize_session(
+                        session_id=session_id,
+                        outbound_queue=session.outbound_audio_queue,
+                        organization_id=session.organization_id,
+                        agent_id=session.agent_id,
+                        agent_config=session.agent_config,
+                        call_id=session.call_id or session.call_sid,
+                        call_direction=session.call_direction or "inbound",
+                        on_response_cancelled=on_response_cancelled,
+                        on_lead_extracted=on_lead_extracted,
+                        on_call_summary=on_call_summary,
+                        on_response_end=on_response_end,
+                    )
+                    session.voice_engine_client = ve_client
+                except (GatewayError, OSError, RuntimeError) as ve_init_err:
+                    slog.warning(
+                        "voice_engine_transport_init_failed",
+                        session_id=session_id,
+                        error=str(ve_init_err),
+                    )
 
         inbound_task: asyncio.Task[None] | None = None
         outbound_task: asyncio.Task[None] | None = None

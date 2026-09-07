@@ -1,6 +1,8 @@
 # Contract 2 — Outbound Job ID, Call ID & Idempotency
 
-**Status:** FROZEN V1 CONTRACT
+> [!WARNING]
+> **Status:** NOT APPROVED / REVIEW ONLY / NOT IMPLEMENTED  
+> This contract was shared for review and boundary freezing only. It is **NOT** approved for implementation, and no outbound idempotency store exists in the Voice Gateway. All idempotency and dispatch tracking belong to the Backend/Campaign systems.
 
 ## Identity Chain
 

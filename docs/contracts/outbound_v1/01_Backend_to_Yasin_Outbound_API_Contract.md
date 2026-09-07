@@ -1,6 +1,8 @@
 # Contract 1 — Backend → Yasin Outbound API
 
-**Status:** FROZEN V1 CONTRACT
+> [!WARNING]
+> **Status:** NOT APPROVED / REVIEW ONLY / NOT IMPLEMENTED  
+> This contract was shared for review and boundary freezing only. It is **NOT** approved for implementation, and no outbound API exists in the Voice Gateway.
 
 ## Purpose
 Backend requests Yasin Voice Gateway to place one outbound call.

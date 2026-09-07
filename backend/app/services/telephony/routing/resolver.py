@@ -66,17 +66,18 @@ class PhoneAssignmentTenantCallRouter(BaseTenantCallRouter):
 
 
 class UnresolvedBackendTenantCallRouter(BaseTenantCallRouter):
-    """Fallback router returning provisional routing when backend is unconfigured."""
+    """Safe router rejecting resolution when backend resolver is unconfigured."""
 
     async def resolve_did(self, inbound_did: str) -> TenantRoutingResolution:
-        logger.info(
-            "DID resolution invoked for DID '%s' (Backend DID router in default mode)",
+        logger.warning(
+            "DID resolution rejected for DID '%s' - Backend DID router is unconfigured",
             inbound_did,
         )
         return TenantRoutingResolution(
-            is_resolved=True,
+            is_resolved=False,
             inbound_did=inbound_did,
-            organization_id="pending_contract_org",
-            agent_id="pending_contract_admission_agent",
-            agent_type="admission_ai",
+            organization_id=None,
+            agent_id=None,
+            agent_type=None,
+            error_message="Backend DID resolver unconfigured",
         )

@@ -1,6 +1,8 @@
 # Contract 3 — Authorized Outbound Caller-ID Selection
 
-**Status:** FROZEN V1 CONTRACT
+> [!WARNING]
+> **Status:** NOT APPROVED / REVIEW ONLY / NOT IMPLEMENTED  
+> This contract was shared for review and boundary freezing only. The Voice Gateway does not own caller ID authorization or outbound phone assignment policy. Caller ID authorization strictly belongs to Aravind's Backend.
 
 ## Principle
 

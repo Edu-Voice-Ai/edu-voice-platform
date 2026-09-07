@@ -1,6 +1,8 @@
 # Contract 5 — Yasin → Lokesh Voice Engine Outbound Session Metadata
 
-**Status:** FROZEN V1 CONTRACT
+> [!WARNING]
+> **Status:** NOT APPROVED / REVIEW ONLY / NOT IMPLEMENTED  
+> This contract was shared for review and boundary freezing only. The generic Voice Engine transport remains telephony-agnostic, and no outbound campaign session modifications are active in the Voice Gateway.
 
 ## Principle
 

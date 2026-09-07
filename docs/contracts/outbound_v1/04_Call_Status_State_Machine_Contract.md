@@ -1,6 +1,8 @@
 # Contract 4 — Outbound Call Status / State Machine
 
-**Status:** FROZEN V1 CONTRACT
+> [!WARNING]
+> **Status:** NOT APPROVED / REVIEW ONLY / NOT IMPLEMENTED  
+> This contract was shared for review and boundary freezing only. The Voice Gateway does not implement an outbound campaign state machine or outbound callback client. Campaign and outbound call state management belongs to the Backend.
 
 ## Canonical Statuses
 

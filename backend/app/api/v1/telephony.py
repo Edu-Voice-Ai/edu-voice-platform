@@ -12,7 +12,7 @@ from backend.app.services.telephony.config import (
     TelephonySettings,
     get_telephony_settings,
 )
-from backend.app.services.telephony.errors import GatewayError
+from backend.app.services.telephony.errors import GatewayError, GatewayErrorCode
 from backend.app.services.telephony.logging import (
     StructuredGatewayLogger,
     mask_identifier,
@@ -21,6 +21,7 @@ from backend.app.services.telephony.logging import (
 from backend.app.services.telephony.routing.phone_assignment import (
     BackendPhoneAssignmentResolver,
     PhoneAssignmentRequest,
+    PhoneAssignmentResolver,
 )
 from backend.app.services.telephony.schemas import (
     CallStatusEventPayload,
@@ -47,6 +48,13 @@ def get_telephony_service(
 ) -> TelephonyService:
     """Dependency provider for TelephonyService instance."""
     return TelephonyService(settings=settings)
+
+
+def get_phone_assignment_resolver(
+    settings: Annotated[TelephonySettings, Depends(get_telephony_settings)],
+) -> PhoneAssignmentResolver:
+    """Dependency provider for PhoneAssignmentResolver instance."""
+    return BackendPhoneAssignmentResolver(settings=settings)
 
 
 @router.post(
@@ -173,6 +181,9 @@ async def call_status_event_webhook(
 async def exotel_dynamic_resolver(
     request: Request,
     settings: Annotated[TelephonySettings, Depends(get_telephony_settings)],
+    resolver: Annotated[
+        PhoneAssignmentResolver, Depends(get_phone_assignment_resolver)
+    ],
     call_sid: Annotated[str | None, Query(alias="CallSid")] = None,
     call_from: Annotated[str | None, Query(alias="CallFrom")] = None,
     call_to: Annotated[str | None, Query(alias="CallTo")] = None,
@@ -231,7 +242,7 @@ async def exotel_dynamic_resolver(
         or params.get("DialWhomNumber")
         or params.get("to")
         or settings.exotel_exophone
-        or "unknown"
+        or ""
     )
     resolved_direction = (
         direction
@@ -240,19 +251,31 @@ async def exotel_dynamic_resolver(
         or "inbound"
     )
 
-    # 1. Resolve destination DID via Aravind's BackendPhoneAssignmentResolver
+    manager = get_realtime_session_manager(settings=settings)
+
+    # Validate destination DID format
+    if not resolved_to or resolved_to.strip() in ("", "unknown"):
+        slog.warning(
+            "did_resolution_rejected",
+            call_sid=mask_identifier(resolved_call_sid),
+            destination_did="unknown",
+            error_code="INVALID_DID_FORMAT",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            reason="Missing or empty destination phone number",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="INVALID_DID_FORMAT: Destination number is missing or invalid",
+        )
+
+    # 1. Resolve destination DID via authoritative BackendPhoneAssignmentResolver
     slog.info(
         "did_resolution_started",
         destination_did=mask_phone_number(resolved_to),
         call_sid=mask_identifier(resolved_call_sid),
     )
 
-    org_id = "pending_contract_org"
-    agent_id = "pending_contract_admission_agent"
-    agent_config = None
-
     try:
-        resolver = BackendPhoneAssignmentResolver(settings=settings)
         resolution = await resolver.resolve_phone_assignment(
             PhoneAssignmentRequest(
                 phone_number=resolved_to,
@@ -261,28 +284,136 @@ async def exotel_dynamic_resolver(
                 call_sid=resolved_call_sid,
             )
         )
-        if resolution and resolution.organization_id:
-            org_id = resolution.organization_id
-            agent_id = resolution.agent_id
-            agent_config = resolution.agent_config
-            slog.info(
-                "did_resolution_success",
-                organization_id=mask_identifier(org_id),
-                agent_id=mask_identifier(agent_id),
-            )
+    except GatewayError as ge:
+        err_msg_lower = ge.message.lower()
+        if "not found" in err_msg_lower or "did_not_found" in err_msg_lower:
+            http_status = status.HTTP_404_NOT_FOUND
+            error_code = "DID_NOT_FOUND"
+            detail_msg = "Dialed number is not registered"
+        elif "suspended" in err_msg_lower or "inactive" in err_msg_lower:
+            if "organization" in err_msg_lower:
+                error_code = "ORGANIZATION_INACTIVE"
+                http_status = status.HTTP_403_FORBIDDEN
+                detail_msg = "Institution account is inactive"
+            elif "agent" in err_msg_lower:
+                error_code = "AGENT_INACTIVE"
+                http_status = status.HTTP_422_UNPROCESSABLE_ENTITY
+                detail_msg = "Assigned agent is currently inactive"
+            else:
+                error_code = "DID_INACTIVE"
+                http_status = status.HTTP_403_FORBIDDEN
+                detail_msg = "Destination number is inactive"
+        elif "format" in err_msg_lower:
+            http_status = status.HTTP_422_UNPROCESSABLE_ENTITY
+            error_code = "INVALID_DID_FORMAT"
+            detail_msg = "Invalid destination number format"
+        elif "no active" in err_msg_lower or "not assigned" in err_msg_lower or "assignment" in err_msg_lower:
+            http_status = status.HTTP_422_UNPROCESSABLE_ENTITY
+            error_code = "NO_ACTIVE_ASSIGNMENT"
+            detail_msg = "No active agent assigned to destination number"
+        elif ge.code == GatewayErrorCode.AUTHENTICATION_FAILED or "unauthorized" in err_msg_lower:
+            http_status = status.HTTP_500_INTERNAL_SERVER_ERROR
+            error_code = "UNAUTHORIZED_INTERNAL_SERVICE"
+            detail_msg = "Telephony routing authentication failure"
+        elif ge.code == GatewayErrorCode.TIMEOUT or "timed out" in err_msg_lower:
+            http_status = status.HTTP_504_GATEWAY_TIMEOUT
+            error_code = "TIMEOUT"
+            detail_msg = "DID resolution timed out"
+        elif ge.code == GatewayErrorCode.SERVICE_UNAVAILABLE or "unavailable" in err_msg_lower or "unreachable" in err_msg_lower:
+            http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+            error_code = "DATABASE_UNAVAILABLE"
+            detail_msg = "Routing database is temporarily unavailable"
         else:
-            slog.warning(
-                "did_resolution_fallback",
-                destination_did=mask_phone_number(resolved_to),
-                status="provisional_default",
-            )
-    except (GatewayError, OSError, RuntimeError) as res_err:
+            http_status = status.HTTP_502_BAD_GATEWAY
+            error_code = "RESOLUTION_ERROR"
+            detail_msg = "DID resolution failed"
+
         slog.warning(
-            "did_resolution_failure",
+            "did_resolution_rejected",
+            call_sid=mask_identifier(resolved_call_sid),
             destination_did=mask_phone_number(resolved_to),
-            error_code=getattr(res_err, "code", "resolution_error"),
-            error=str(res_err),
+            error_code=error_code,
+            status_code=http_status,
+            reason=detail_msg,
         )
+        raise HTTPException(
+            status_code=http_status,
+            detail=f"{error_code}: {detail_msg}",
+        ) from ge
+    except Exception as exc:
+        slog.warning(
+            "did_resolution_rejected",
+            call_sid=mask_identifier(resolved_call_sid),
+            destination_did=mask_phone_number(resolved_to),
+            error_code="UNEXPECTED_RESOLVER_ERROR",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            reason=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="RESOLUTION_ERROR: Unexpected resolver failure",
+        ) from exc
+
+    # Enforce authoritative tenant and agent validation (Zero default/placeholder tenants allowed)
+    if (
+        not resolution
+        or not resolution.organization_id
+        or not resolution.agent_id
+        or resolution.organization_id.strip() in ("", "pending_contract_org", "unknown")
+        or resolution.agent_id.strip() in ("", "pending_contract_admission_agent", "unknown")
+    ):
+        slog.warning(
+            "did_resolution_rejected",
+            call_sid=mask_identifier(resolved_call_sid),
+            destination_did=mask_phone_number(resolved_to),
+            error_code="NO_ACTIVE_ASSIGNMENT",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            reason="Missing or invalid organization_id or agent_id in resolution",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="NO_ACTIVE_ASSIGNMENT: Incomplete or invalid tenant routing assignment",
+        )
+
+    if not resolution.is_active:
+        slog.warning(
+            "did_resolution_rejected",
+            call_sid=mask_identifier(resolved_call_sid),
+            destination_did=mask_phone_number(resolved_to),
+            error_code="DID_INACTIVE",
+            status_code=status.HTTP_403_FORBIDDEN,
+            reason="DID assignment is inactive",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="DID_INACTIVE: Destination number is inactive",
+        )
+
+    if resolution.agent_config and not resolution.agent_config.is_active:
+        slog.warning(
+            "did_resolution_rejected",
+            call_sid=mask_identifier(resolved_call_sid),
+            destination_did=mask_phone_number(resolved_to),
+            error_code="AGENT_INACTIVE",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            reason="Assigned agent is inactive",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="AGENT_INACTIVE: Assigned agent is currently inactive",
+        )
+
+    org_id = resolution.organization_id.strip()
+    agent_id = resolution.agent_id.strip()
+    agent_config = resolution.agent_config
+
+    slog.info(
+        "did_resolution_success",
+        destination_did=mask_phone_number(resolved_to),
+        call_sid=mask_identifier(resolved_call_sid),
+        organization_id=mask_identifier(org_id),
+        agent_id=mask_identifier(agent_id),
+    )
 
     # 2. Generate unique internal session_id
     unique_suffix = uuid.uuid4().hex[:12]
@@ -306,8 +437,7 @@ async def exotel_dynamic_resolver(
         ):
             provider_metadata[k] = str(v)
 
-    # 4. Register session in RealtimeSessionManager
-    manager = get_realtime_session_manager(settings=settings)
+    # 4. Register session in RealtimeSessionManager with authoritative tenant assignment
     await manager.create_session(
         session_id=session_id,
         call_sid=resolved_call_sid,

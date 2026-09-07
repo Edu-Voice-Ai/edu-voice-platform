@@ -57,8 +57,6 @@ def build_session_start_payload(
     sample_rate: int = 16000,
     call_id: str | None = None,
     call_direction: str = "inbound",
-    campaign_id: str | None = None,
-    contact_id: str | None = None,
 ) -> SessionStartPayload:
     """Build a canonical SessionStartPayload from resolved session and agent metadata."""
     template_type = "education"
@@ -117,8 +115,6 @@ def build_session_start_payload(
         agent_id=agent_id,
         call_direction=call_direction,
         language=language,
-        campaign_id=campaign_id,
-        contact_id=contact_id,
         client_sample_rate=sample_rate,
         template_type=template_type,
         business_name=business_name,
@@ -158,8 +154,6 @@ class WsVoiceEngineTransport(BaseVoiceEngineTransport):
         agent_config: Any | None = None,
         call_id: str | None = None,
         call_direction: str = "inbound",
-        campaign_id: str | None = None,
-        contact_id: str | None = None,
         on_audio_output: Any | None = None,
         on_response_cancelled: Any | None = None,
         on_response_end: Any | None = None,
@@ -168,6 +162,28 @@ class WsVoiceEngineTransport(BaseVoiceEngineTransport):
         on_error: Any | None = None,
     ) -> VoiceEngineWsClient:
         """Create and connect a new VoiceEngineWsClient instance."""
+        # Multi-tenant security check: Voice Engine initialization is permitted ONLY with authoritative tenant identity
+        resolved_org = (start_payload.organization_id if start_payload else organization_id) or ""
+        resolved_agent = (start_payload.agent_id if start_payload else agent_id) or ""
+        if (
+            not resolved_org.strip()
+            or not resolved_agent.strip()
+            or resolved_org.strip() in ("", "pending_contract_org", "unknown", "default")
+            or resolved_agent.strip() in ("", "pending_contract_admission_agent", "unknown", "default")
+            or resolved_org.startswith("pending_")
+            or resolved_agent.startswith("pending_")
+        ):
+            logger.warning(
+                "voice_engine_init_rejected_unresolved_tenant: session_id=%s, org=%s, agent=%s",
+                session_id,
+                resolved_org,
+                resolved_agent,
+            )
+            raise GatewayError(
+                GatewayErrorCode.VALIDATION_FAILED,
+                "Voice Engine session initialization rejected: authoritative organization_id and agent_id are required",
+            )
+
         async with self._lock:
             if session_id in self._clients:
                 existing = self._clients[session_id]
@@ -182,8 +198,6 @@ class WsVoiceEngineTransport(BaseVoiceEngineTransport):
                 sample_rate=self.settings.voice_engine_sample_rate,
                 call_id=call_id,
                 call_direction=call_direction,
-                campaign_id=campaign_id,
-                contact_id=contact_id,
             )
 
             if outbound_queue is not None:

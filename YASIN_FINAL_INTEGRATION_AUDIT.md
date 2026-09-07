@@ -89,23 +89,24 @@ All five Frozen Outbound Contracts (`docs/contracts/outbound_v1/01` through `05`
 | **Error Mapping** | Map 401, 404, 403, 422, 503 to `GatewayError` | Handled cleanly without DB error leaks | **PASS — verified locally** | Verified by `test_backend_phone_assignment_resolver.py` |
 | **Deployed Backend DID** | Real Supabase DID lookup in staging/prod | Target: `POST /api/v1/internal/telephony/resolve-did` | **BLOCKED — waiting for Aravind** | Requires Aravind's FastAPI service deployment |
 
-### H. Outbound Engine & Idempotency
-| Component | Requirement | Implementation Reference | Audit Result | Notes |
-|---|---|---|---|---|
-| **Outbound API** | `POST /api/v1/internal/telephony/outbound-calls` | `backend/app/api/v1/internal_telephony.py` | **PASS — verified locally** | Contract 01 compliant; returns HTTP 202 |
-| **Persistent Idempotency**| Cross-restart SQLite store | `backend/app/services/telephony/idempotency.py` | **PASS — verified locally** | Contract 02 compliant; persists to `data/outbound_idempotency.db` |
-| **Conflict Detection** | HTTP 409 `IDEMPOTENCY_CONFLICT` on tampered payload | Tested with modified `call_id` / phone numbers | **PASS — verified locally** | Verified by `test_idempotency_conflict_returns_http_409` |
-| **Caller ID Forwarding** | Forward Backend's authorized `from_phone_number` | Verified via Exotel API client | **PASS — verified locally** | Contract 03 compliant |
-| **10 Canonical Statuses** | `QUEUED`, `DIALING`, `RINGING`, `IN_PROGRESS`, etc. | `OutboundCallStatus` enum in `outbound_schemas.py` | **PASS — verified locally** | Contract 04 compliant |
-| **Status Callback Client**| Post call status updates to Aravind Backend | `backend/app/services/telephony/clients/backend_client.py`| **PASS — verified locally** | Dispatches to `/api/v1/internal/telephony/outbound-calls/{call_id}/status` |
-| **Deployed Backend Callback**| Live reception of status events | Target: `{BACKEND_INTERNAL_URL}/status` | **BLOCKED — waiting for Aravind** | Requires Aravind's callback endpoint deployment |
+### H. Outbound Engine & Calling Contracts (REVERTED / NOT APPROVED)
+> [!IMPORTANT]
+> The Outbound Calling architecture and contracts (01–05) were NOT approved as implementation instructions. All unauthorized outbound implementation code (including `internal_telephony.py`, `idempotency.py`, `outbound_schemas.py`, `backend_client.py`, and `test_outbound_contracts.py`) has been completely reverted and removed. Yasin Gateway strictly owns Inbound Telephony.
+
+| Component | Status | Resolution |
+|---|---|---|
+| **Outbound Calling API (Contract 01)** | **REVERTED** | `backend/app/api/v1/internal_telephony.py` deleted. Gateway does not accept outbound dialing requests. |
+| **Idempotency Store (Contract 02)** | **REVERTED** | `backend/app/services/telephony/idempotency.py` and `data/outbound_idempotency.db` deleted. |
+| **Authorized Caller ID (Contract 03)** | **REVERTED** | Outbound dialing validation logic removed from gateway. |
+| **Call Status State Machine (Contract 04)** | **REVERTED** | Outbound state machine and `backend_client.py` status callbacks removed. |
+| **Outbound Session Metadata (Contract 05)** | **REVERTED** | Outbound campaign metadata removed from `session.start`. All calls strictly route as inbound. |
 
 ### I. Lokesh Voice Engine Integration
 | Component | Requirement | Implementation Reference | Audit Result | Notes |
 |---|---|---|---|---|
 | **Protocol** | Generic JSON + Binary WebSocket protocol | `backend/app/services/telephony/voice_engine_contract.py`| **PASS — verified against deployed service** | Tested against `wss://voice-test.gentechs.in/ws/voice` |
 | **`session.start` Handshake**| Transmit session context to Voice Engine | WebSocket client initiation | **PASS — verified against deployed service** | Returned `{"event": "session.ready", "status": "ready"}` |
-| **Outbound Metadata** | Transmit `call_direction="outbound"`, `campaign_id`, `contact_id` | Contract 05 schema | **PASS — verified against deployed service** | Returned `{"event": "session.ready", "status": "ready"}` |
+| **Inbound Session Metadata** | Transmit `call_direction="inbound"`, verified tenant context | Voice Engine contract schema | **PASS — verified against deployed service** | Verified by unit tests and live probe |
 | **Audio I/O** | 16 kHz PCM16 binary chunks | Handled over WebSocket | **PASS — verified locally** | Verified by `test_voice_engine_binary_pcm_audio_forwarding` |
 | **Barge-In Handling** | Handle `response.cancelled` from Engine | Flushes queues and carrier buffers | **PASS — verified locally** | Verified by `test_voice_engine_barge_in_cancelled_and_queue_drain` |
 | **Post-Call Intel** | Handle `lead.extracted` and `call.summary` | Handled at `session.end` | **PASS — verified locally** | Verified by `test_voice_engine_session_end_and_post_call_intelligence` |
@@ -115,7 +116,7 @@ All five Frozen Outbound Contracts (`docs/contracts/outbound_v1/01` through `05`
 |---|---|---|---|---|
 | **Docker Build** | Multi-stage build (`python:3.12-slim-bookworm`) | [Dockerfile](file:///c:/Anti%20Gravity/P-1/Dockerfile) | **PASS — verified locally** | Minimal footprint, layer-cached pip install |
 | **Non-Root Runtime** | Unprivileged `appuser:appgroup` (UID 10001) | Dockerfile user definition | **PASS — verified locally** | Standard container security compliance |
-| **Volume Persistence** | Persistent SQLite store volume mount | `docker-compose.prod.yml` (`./data:/app/data`) | **PASS — verified locally** | Preserves idempotency database across upgrades |
+| **Volume Configuration** | Stateless inbound gateway runtime | `docker-compose.prod.yml` | **PASS — verified locally** | Outbound SQLite persistence volume removed |
 | **Local Port Security** | Port 8000 bound exclusively to `127.0.0.1` | `docker-compose.prod.yml` | **PASS — verified locally** | Direct public HTTP traffic blocked |
 | **Cloudflare Tunnel** | Secure ingress to `gateway.gentechs.in` | Cloudflare tunnel configuration | **PASS — verified against deployed service** | HTTPS and WSS routing verified |
 | **Health Endpoint** | `GET /health` returns HTTP 200 | `https://gateway.gentechs.in/health` | **PASS — verified against deployed service** | Live probe verified |

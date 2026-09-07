@@ -44,13 +44,6 @@ class TelephonySettings(BaseSettings):
         ),
         description="Timeout in milliseconds for internal DID resolution requests",
     )
-    outbound_idempotency_store_path: str = Field(
-        default="data/outbound_idempotency.db",
-        validation_alias=AliasChoices(
-            "TELEPHONY_OUTBOUND_IDEMPOTENCY_STORE_PATH", "OUTBOUND_IDEMPOTENCY_STORE_PATH"
-        ),
-        description="File path for persistent SQLite outbound idempotency store",
-    )
 
     # Webhook Verification Configuration
     webhook_secret: SecretStr = Field(

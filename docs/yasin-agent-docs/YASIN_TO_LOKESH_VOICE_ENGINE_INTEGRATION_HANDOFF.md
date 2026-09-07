@@ -1,5 +1,11 @@
 # Yasin ↔ Lokesh Voice Engine Integration Handoff
 
+> [!IMPORTANT]
+> **OUTBOUND ARCHITECTURE STATUS: NOT APPROVED / REVIEW ONLY**
+> The Outbound Calling architecture document and the five outbound contracts (Contracts 01–05) were NOT approved as implementation instructions. They were shared for reading, review, technical confirmation, and freezing boundaries only.
+> All unauthorized outbound implementation code in Yasin Gateway has been completely reverted. Yasin Gateway strictly owns and executes Inbound Telephony.
+> The sections below referencing outbound flow are specification guidelines only, NOT active code.
+
 ## Document Purpose
 
 This document defines the practical integration boundary between:
@@ -7,7 +13,7 @@ This document defines the practical integration boundary between:
 - **Yasin's Telephony Gateway**
 - **Lokesh's Generic AI Voice Engine**
 
-The 5 Frozen Outbound Contracts remain the source of truth. This document does **not** replace or modify those contracts. It provides the concrete connection, transport, metadata, audio, lifecycle, testing, and production handoff requirements needed to connect Yasin's Gateway to the already-verified Voice Engine.
+The 5 Frozen Outbound Contracts remain specifications for review only. This document provides the concrete connection, transport, metadata, audio, lifecycle, testing, and production handoff requirements needed to connect Yasin's Gateway to the already-verified Voice Engine for Inbound Telephony.
 
 ---
 

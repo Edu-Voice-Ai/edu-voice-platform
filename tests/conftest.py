@@ -8,10 +8,16 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from backend.app.api.v1.telephony import get_phone_assignment_resolver
 from backend.app.main import app
 from backend.app.services.telephony.config import (
     TelephonySettings,
     get_telephony_settings,
+)
+from backend.app.services.telephony.routing.phone_assignment import (
+    InMemoryPhoneAssignmentResolver,
+    PhoneAssignmentResult,
+    ResolvedAgentConfig,
 )
 
 
@@ -34,9 +40,43 @@ def test_settings(mock_webhook_secret: str) -> TelephonySettings:
 
 
 @pytest.fixture
-def client(test_settings: TelephonySettings) -> Generator[TestClient, None, None]:
-    """TestClient configured with overridden settings."""
+def test_phone_resolver() -> InMemoryPhoneAssignmentResolver:
+    """In-memory resolver populated with valid test DIDs."""
+    resolver = InMemoryPhoneAssignmentResolver()
+    default_cfg = ResolvedAgentConfig(
+        organization_id="org_test_institution",
+        agent_id="agent_test_counselor",
+        agent_name="Test Counselor",
+        is_active=True,
+    )
+    for num in (
+        "+912249360001",
+        "02249360001",
+        "022-493-60001",
+        "+911140001234",
+        "+918047361234",
+    ):
+        resolver.register_assignment(
+            PhoneAssignmentResult(
+                phone_number=num,
+                organization_id="org_test_institution",
+                agent_id="agent_test_counselor",
+                agent_type="admission_ai",
+                is_active=True,
+                agent_config=default_cfg,
+            )
+        )
+    return resolver
+
+
+@pytest.fixture
+def client(
+    test_settings: TelephonySettings,
+    test_phone_resolver: InMemoryPhoneAssignmentResolver,
+) -> Generator[TestClient, None, None]:
+    """TestClient configured with overridden settings and test resolver."""
     app.dependency_overrides[get_telephony_settings] = lambda: test_settings
+    app.dependency_overrides[get_phone_assignment_resolver] = lambda: test_phone_resolver
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

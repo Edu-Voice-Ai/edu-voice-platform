@@ -78,14 +78,6 @@ class SessionStartPayload(BaseModel):
         default="en-IN",
         description="Initial language (e.g. en-IN, hi-IN, te-IN)",
     )
-    campaign_id: str | None = Field(
-        default=None,
-        description="Optional campaign identifier context (Contract 5)",
-    )
-    contact_id: str | None = Field(
-        default=None,
-        description="Optional contact identifier context (Contract 5)",
-    )
     client_sample_rate: int = Field(
         default=16000,
         description="Sample rate of inbound/outbound audio (16000 or 8000)",

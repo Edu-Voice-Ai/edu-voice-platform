@@ -60,17 +60,11 @@ class RealtimeVoiceSession:
         to_number: str | None = None,
         call_direction: str | None = None,
         provider_metadata: dict[str, Any] | None = None,
-        outbound_job_id: str | None = None,
-        campaign_id: str | None = None,
-        contact_id: str | None = None,
         call_id: str | None = None,
     ) -> None:
         self.session_id: str = session_id
         self.call_sid: str | None = call_sid
         self.call_id: str | None = call_id or call_sid
-        self.outbound_job_id: str | None = outbound_job_id
-        self.campaign_id: str | None = campaign_id
-        self.contact_id: str | None = contact_id
         self.organization_id: str | None = organization_id
         self.agent_id: str | None = agent_id
         self.agent_config: Any | None = agent_config

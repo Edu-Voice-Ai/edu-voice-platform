@@ -8,9 +8,6 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api.v1.health import router as health_router
-from backend.app.api.v1.internal_telephony import (
-    router as internal_telephony_router,
-)
 from backend.app.api.v1.telephony import router as telephony_router
 from backend.app.services.telephony.gateway import WebSocketAudioGateway
 from backend.app.services.telephony.session_manager import get_realtime_session_manager
@@ -71,7 +68,6 @@ def create_app() -> FastAPI:
     # Mount API routers
     application.include_router(health_router, tags=["Health"])
     application.include_router(telephony_router, prefix="/api/v1")
-    application.include_router(internal_telephony_router, prefix="/api/v1")
 
     # Realtime Voice Gateway WebSocket Endpoint
     @application.websocket("/ws/telephony/stream/{session_id}")

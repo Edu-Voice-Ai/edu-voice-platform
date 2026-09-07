@@ -1,8 +1,5 @@
 """Telephony / Voice Gateway Service Package."""
 
-from backend.app.services.telephony.clients.backend_client import (
-    BackendStatusCallbackClient,
-)
 from backend.app.services.telephony.config import (
     TelephonySettings,
     get_telephony_settings,
@@ -21,11 +18,6 @@ from backend.app.services.telephony.frames import (
     InternalAudioMessage,
 )
 from backend.app.services.telephony.gateway import WebSocketAudioGateway
-from backend.app.services.telephony.idempotency import (
-    IdempotencyConflictError,
-    PersistentIdempotencyStore,
-    get_idempotency_store,
-)
 from backend.app.services.telephony.lifecycle.session import (
     CallSession,
     CallSessionLifecycleManager,
@@ -45,12 +37,6 @@ from backend.app.services.telephony.metrics import (
     get_gateway_metrics,
 )
 from backend.app.services.telephony.mock_stream import MockAudioStreamClient
-from backend.app.services.telephony.outbound_schemas import (
-    OutboundCallRequest,
-    OutboundCallResponse,
-    OutboundCallStatus,
-    OutboundCallStatusCallbackPayload,
-)
 from backend.app.services.telephony.providers.base import BaseTelephonyProvider
 from backend.app.services.telephony.providers.generic import GenericTelephonyProvider
 from backend.app.services.telephony.realtime_session import (
@@ -119,7 +105,6 @@ __all__ = [
     "AudioOutputData",
     "AudioOutputEvent",
     "BackendPhoneAssignmentResolver",
-    "BackendStatusCallbackClient",
     "BaseTelephonyProvider",
     "BaseTenantCallRouter",
     "BaseVoiceEngineTransport",
@@ -141,18 +126,12 @@ __all__ = [
     "GenericTelephonyProvider",
     "HMACSHA256WebhookVerifier",
     "HealthResponse",
-    "IdempotencyConflictError",
     "InMemoryPhoneAssignmentResolver",
     "InboundCallPayload",
     "InternalAudioMessage",
     "LeadExtractedEvent",
     "MockAudioStreamClient",
     "NormalizedTelephonyEvent",
-    "OutboundCallRequest",
-    "OutboundCallResponse",
-    "OutboundCallStatus",
-    "OutboundCallStatusCallbackPayload",
-    "PersistentIdempotencyStore",
     "PhoneAssignmentRequest",
     "PhoneAssignmentResolver",
     "PhoneAssignmentResult",
@@ -185,7 +164,6 @@ __all__ = [
     "build_session_start_payload",
     "get_gateway_metrics",
     "get_gateway_rate_limiter",
-    "get_idempotency_store",
     "get_realtime_session_manager",
     "get_telephony_settings",
     "sanitize_dict",

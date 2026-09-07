@@ -83,91 +83,23 @@ If the DID or tenant cannot be resolved, the Backend MUST return appropriate HTT
 
 ---
 
-## 3. Outbound Contract: Call Initiation (Backend ➔ Gateway)
+## 3. Outbound Calling Architecture Notice
 
-### 3.1 Endpoint Specification
-- **Method:** `POST`
-- **Path:** `/api/v1/internal/telephony/outbound-calls`
-- **Headers:**
-  - `Content-Type: application/json`
-  - `X-Internal-Service-Key: <INTERNAL_SERVICE_KEY>`
-  - `Idempotency-Key: <outbound_job_id>` (Optional, must match `outbound_job_id`)
-
-### 3.2 Request Payload
-```json
-{
-  "outbound_job_id": "job_01H123456789ABCDEF01234567",
-  "call_id": "call_01H123456789ABCDEF01234567",
-  "organization_id": "org_01H123456789ABCDEF01234567",
-  "campaign_id": "camp_01H123456789ABCDEF01234567",
-  "contact_id": "cont_01H123456789ABCDEF01234567",
-  "agent_id": "agent_01H123456789ABCDEF01234567",
-  "from_phone_number": "+918047361234",
-  "to_phone_number": "+919876543210",
-  "language": "en-IN",
-  "metadata": {
-    "custom_field": "admissions_batch_1"
-  }
-}
-```
-
-### 3.3 Synchronous Acceptance Response (Gateway ➔ Backend)
-- **Status Code:** `202 Accepted`
-```json
-{
-  "accepted": true,
-  "outbound_job_id": "job_01H123456789ABCDEF01234567",
-  "call_id": "call_01H123456789ABCDEF01234567",
-  "gateway_call_id": "gw_01956789abcd...",
-  "provider_call_id": null,
-  "status": "DIALING"
-}
-```
+> [!WARNING]
+> **STATUS: NOT APPROVED / REVIEW ONLY / NOT IMPLEMENTED**
+> Outbound calling contracts (POST `/api/v1/internal/telephony/outbound-calls`, status callbacks, persistent idempotency store) were shared for architectural review only.
+> They are **NOT** approved implementation instructions.
+> All unauthorized outbound implementations have been excised and reverted from the Voice Gateway.
+> The Gateway strictly maintains the **Inbound Telephony / Provider Bridge** role.
 
 ---
 
-## 4. Outbound Contract: Status Callbacks (Gateway ➔ Backend)
-
-### 4.1 Endpoint Specification
-- **Method:** `POST`
-- **Path:** `/api/v1/internal/telephony/outbound-calls/{call_id}/status`
-- **Headers:**
-  - `Content-Type: application/json`
-  - `X-Internal-Service-Key: <INTERNAL_SERVICE_KEY>`
-
-### 4.2 Callback Payload
-```json
-{
-  "call_id": "call_01H123456789ABCDEF01234567",
-  "outbound_job_id": "job_01H123456789ABCDEF01234567",
-  "gateway_call_id": "gw_01956789abcd...",
-  "provider_call_id": "exo_call_123456",
-  "status": "RINGING",
-  "failure_code": null,
-  "failure_reason": null,
-  "occurred_at": "2026-09-06T12:00:00Z"
-}
-```
-
-### 4.3 10 Canonical Statuses
-1. `QUEUED`
-2. `DIALING`
-3. `RINGING`
-4. `IN_PROGRESS`
-5. `COMPLETED` *(Terminal)*
-6. `BUSY` *(Terminal)*
-7. `NO_ANSWER` *(Terminal)*
-8. `FAILED` *(Terminal)*
-9. `CANCELLED` *(Terminal)*
-10. `REJECTED` *(Terminal)*
-
----
-
-## 5. Exact Actions Required from Aravind
+## 4. Exact Actions Required from Aravind
 
 | Action Item | Component | Current State | Required Next Step |
 |---|---|---|---|
-| **1. DID Resolver Endpoint** | `POST /api/v1/internal/telephony/resolve-did` | **BLOCKED — waiting for Aravind** | Deploy FastAPI endpoint connected to Supabase and verify resolution for ExoPhone `022-493-60001` / `+918047361234`. |
-| **2. Status Callback Receiver** | `POST /api/v1/internal/telephony/outbound-calls/{call_id}/status` | **BLOCKED — waiting for Aravind** | Implement receiver endpoint to ingest real-time status transitions and update campaign state. |
-| **3. Backend Internal Hostname** | Network Configuration | `http://localhost:8000` / `http://backend:8000` | Provide internal Docker/VPC URL (`BACKEND_INTERNAL_URL`) where Gateway can reach Backend. |
-| **4. Shared Secret Alignment** | `INTERNAL_SERVICE_KEY` | Configured with test token | Ensure the production random 64-character token matches on both Gateway and Backend. |
+| **1. DID Resolver Endpoint** | `POST /api/v1/internal/telephony/resolve-did` | **PENDING — waiting for Aravind** | Deploy FastAPI endpoint connected to Supabase and verify resolution for ExoPhone numbers. Requires `phone_number`, `X-Internal-Service-Key`. |
+| **2. Backend Internal Hostname** | Network Configuration | `http://localhost:8000` / `http://backend:8000` | Provide internal Docker/VPC URL (`BACKEND_INTERNAL_URL`) where Gateway can reach Backend for DID resolution. |
+| **3. Shared Secret Alignment** | `INTERNAL_SERVICE_KEY` | Configured with test token | Ensure the production random 64-character token matches on both Gateway and Backend. |
+| **4. DID Rejection Verification** | Inactive/Unmapped Numbers | Tested & Verified | Verify that unmapped DIDs return 404/422/403 so Gateway safely rejects calls without fallback. |
+
