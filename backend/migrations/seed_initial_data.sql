@@ -36,7 +36,7 @@ BEGIN
         'https://apexcollege.edu.in',
         'Asia/Kolkata',
         'Director Admissions',
-        '+912249360001',
+        '+919613886363',
         'admissions@apexcollege.edu.in',
         '{"city": "Bengaluru", "state": "Karnataka", "country": "India", "pincode": "560100"}'::jsonb,
         TRUE
@@ -114,18 +114,21 @@ BEGIN
         organization_id,
         phone_number,
         provider,
+        provider_sid,
         country_code,
         status
     ) VALUES (
         v_phone_id,
         v_org_id,
-        '+912249360001',
+        '+919613886363',
         'exotel',
+        'eduvoiceagent1',
         'IN',
         'active'
     ) ON CONFLICT (id) DO UPDATE SET
         phone_number = EXCLUDED.phone_number,
         organization_id = EXCLUDED.organization_id,
+        provider_sid = EXCLUDED.provider_sid,
         status = 'active';
 
     -- 5. Assign Virtual DID to AI Agent
