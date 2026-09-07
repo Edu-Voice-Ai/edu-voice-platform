@@ -29,9 +29,13 @@ class ReadinessResponse(BaseModel):
 )
 async def health_check() -> HealthResponse:
     """Return process liveness without external infrastructure dependencies."""
+    from backend.app.services.telephony.config import get_telephony_settings
+
+    settings = get_telephony_settings()
     return HealthResponse(
         status="ok",
         service="edu-voice-ai-backend",
+        environment=settings.environment,
     )
 
 

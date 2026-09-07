@@ -191,6 +191,9 @@ class TelephonySettings(BaseSettings):
     # Operational / Environment Settings
     environment: str = Field(
         default="development",
+        validation_alias=AliasChoices(
+            "TELEPHONY_ENVIRONMENT", "ENVIRONMENT"
+        ),
         description="Application environment (development, staging, production)",
     )
     default_country_code: str = Field(
