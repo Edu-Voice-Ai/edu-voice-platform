@@ -69,12 +69,15 @@ try:
         with open(fpath, "r", encoding="utf-8") as f:
             sql_content = f.read()
 
-        # Handle idempotency for triggers: DROP TRIGGER IF EXISTS before CREATE TRIGGER
-        # Match pattern: CREATE TRIGGER <name> ... ON <table_name>
+        # Make SQL fully idempotent
         import re
         
         # Replace CREATE TRIGGER with CREATE OR REPLACE TRIGGER (Postgres 14+)
         modified_sql = re.sub(r'\bCREATE\s+TRIGGER\b', 'CREATE OR REPLACE TRIGGER', sql_content, flags=re.IGNORECASE)
+
+        # Replace CREATE [UNIQUE] INDEX with CREATE [UNIQUE] INDEX IF NOT EXISTS
+        modified_sql = re.sub(r'\bCREATE\s+UNIQUE\s+INDEX\b(?!\s+IF\s+NOT\s+EXISTS)', 'CREATE UNIQUE INDEX IF NOT EXISTS', modified_sql, flags=re.IGNORECASE)
+        modified_sql = re.sub(r'\bCREATE\s+INDEX\b(?!\s+IF\s+NOT\s+EXISTS)', 'CREATE INDEX IF NOT EXISTS', modified_sql, flags=re.IGNORECASE)
         
         # For policies in 00008: DROP POLICY IF EXISTS before CREATE POLICY
         if "00008" in mf:
