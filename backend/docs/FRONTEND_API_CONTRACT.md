@@ -109,31 +109,33 @@ All responses strictly follow standard JSON wrappers:
 | `POST` | `/api/v1/organizations/{organization_id}/calls/{call_id}/summary` | Staff+ | Save post-call AI analysis summary. |
 
 ### 3.6 Admission Leads & Counselor Tasks
-| Method | Endpoint | Access Role | Description |
-|---|---|---|---|
-| `GET` | `/api/v1/organizations/{organization_id}/leads` | Member+ | List leads (search query, filter by `status`, `interest_level`, `assigned_to`). |
-| `POST` | `/api/v1/organizations/{organization_id}/leads` | Staff+ | Create an admission lead prospect. |
-| `GET` | `/api/v1/organizations/{organization_id}/leads/{lead_id}` | Member+ | Get lead details with extracted entities. |
-| `PATCH` | `/api/v1/organizations/{organization_id}/leads/{lead_id}` | Staff+ | Update lead status, interest score, counselor assignment. |
-| `DELETE` | `/api/v1/organizations/{organization_id}/leads/{lead_id}` | Admin | Delete a lead record. |
-| `GET` | `/api/v1/organizations/{organization_id}/followups` | Member+ | List scheduled followups and callbacks. |
-| `POST` | `/api/v1/organizations/{organization_id}/followups` | Staff+ | Schedule a counselor follow-up task. |
-| `GET` | `/api/v1/organizations/{organization_id}/followups/{followup_id}` | Member+ | Get followup details. |
-| `PATCH` | `/api/v1/organizations/{organization_id}/followups/{followup_id}` | Staff+ | Complete/reschedule followup task. |
+## 4. Complete Endpoints Reference Matrix
 
-### 3.7 Knowledge Base & Documents
-| Method | Endpoint | Access Role | Description |
-|---|---|---|---|
-| `GET` | `/api/v1/organizations/{organization_id}/knowledge` | Member+ | List knowledge documents (filter by `category`, `status`). |
-| `POST` | `/api/v1/organizations/{organization_id}/knowledge` | Staff+ | Upload/register document metadata. |
-| `GET` | `/api/v1/organizations/{organization_id}/knowledge/{doc_id}` | Member+ | Get document details and indexing status. |
-| `PATCH` | `/api/v1/organizations/{organization_id}/knowledge/{doc_id}` | Staff+ | Update document title, category, or status. |
-| `DELETE` | `/api/v1/organizations/{organization_id}/knowledge/{doc_id}` | Admin | Delete document and cascade delete chunks. |
-| `GET` | `/api/v1/organizations/{organization_id}/knowledge/{doc_id}/chunks` | Member+ | View text chunks generated from document. |
+| Domain | Method | Endpoint | Access Role | Description |
+|---|---|---|---|---|
+| **Auth** | `GET` | `/api/v1/me` | Authenticated | Get current authenticated user profile & memberships. |
+| **Organizations** | `GET` | `/api/v1/organizations` | Authenticated | List all organizations user belongs to. |
+| **Organizations** | `POST` | `/api/v1/organizations` | Authenticated | Create a new educational institution. |
+| **Organizations** | `GET` | `/api/v1/organizations/{org_id}` | Member+ | Get organization profile details. |
+| **Organizations** | `PATCH` | `/api/v1/organizations/{org_id}` | Admin | Update institution profile & contact details. |
+| **Organizations** | `GET` | `/api/v1/organizations/{org_id}/members` | Member+ | List team members and assigned roles. |
+| **Agents** | `GET` | `/api/v1/organizations/{org_id}/agents` | Member+ | List AI admission agents. |
+| **Agents** | `POST` | `/api/v1/organizations/{org_id}/agents` | Admin | Create a new AI admission agent. |
+| **Agents** | `GET` | `/api/v1/organizations/{org_id}/agents/{agent_id}` | Member+ | Get agent details with voice & prompt configuration. |
+| **Agents** | `PATCH` | `/api/v1/organizations/{org_id}/agents/{agent_id}/config` | Admin | Update voice speed, prompt, and SIP handoff. |
+| **Telephony** | `GET` | `/api/v1/organizations/{org_id}/phone-numbers` | Member+ | List virtual DID numbers (e.g. `040-459-01132`). |
+| **Telephony** | `POST` | `/api/v1/organizations/{org_id}/phone-numbers/{phone_id}/assign` | Admin | Assign virtual DID to an AI agent. |
+| **Calls** | `GET` | `/api/v1/organizations/{org_id}/calls` | Member+ | Paginated call logs (filters: agent, status, outcome, date). |
+| **Calls** | `GET` | `/api/v1/organizations/{org_id}/calls/{call_id}` | Member+ | Get call summary, outcome, and sentiment. |
+| **Calls** | `GET` | `/api/v1/organizations/{org_id}/calls/{call_id}/transcript` | Member+ | Get turn-by-turn conversational transcript. |
+| **Calls** | `GET` | `/api/v1/organizations/{org_id}/calls/{call_id}/recording` | Member+ | Get audio stream URL for call recording. |
+| **Leads** | `GET` | `/api/v1/organizations/{org_id}/leads` | Member+ | Paginated leads captured by AI phone calls. |
+| **Leads** | `PATCH` | `/api/v1/organizations/{org_id}/leads/{lead_id}` | Staff+ | Update lead status, notes, or assignment. |
+| **Knowledge** | `GET` | `/api/v1/organizations/{org_id}/knowledge` | Member+ | List uploaded institutional brochures/documents. |
+| **Knowledge** | `POST` | `/api/v1/organizations/{org_id}/knowledge/upload` | Staff+ | Upload PDF/Doc for RAG vector embedding. |
+| **Knowledge** | `DELETE` | `/api/v1/organizations/{org_id}/knowledge/{doc_id}` | Admin | Delete knowledge document & embeddings. |
+| **Knowledge** | `POST` | `/api/v1/organizations/{org_id}/knowledge/search` | Member+ | Test semantic similarity query against RAG. |
+| **Usage** | `GET` | `/api/v1/organizations/{org_id}/usage/summary` | Member+ | Dashboard metrics (calls, minutes, conversion rate). |
+| **Usage** | `GET` | `/api/v1/organizations/{org_id}/usage/analytics` | Member+ | Time-series call analytics & hourly heatmaps. |
 
-### 3.8 Usage & Audit Logs
-| Method | Endpoint | Access Role | Description |
-|---|---|---|---|
-| `GET` | `/api/v1/organizations/{organization_id}/usage` | Member+ | List usage records (filter by `metric_type`, `from_date`, `to_date`). |
-| `GET` | `/api/v1/organizations/{organization_id}/usage/summary` | Member+ | Aggregated usage metrics (voice minutes, tokens, cost). |
-| `GET` | `/api/v1/organizations/{organization_id}/audit-logs` | Admin | Administrative security and audit logs. |
+For the complete TypeScript types, UI page blueprint, and API payload schemas, refer to [`docs/frontend/FRONTEND_MASTER_ARCHITECTURE_AND_API_SPEC.md`](file:///c:/Users/Aravi/Downloads/PROJECTS/edu-voice-ai/edu-voice-platform/docs/frontend/FRONTEND_MASTER_ARCHITECTURE_AND_API_SPEC.md).
