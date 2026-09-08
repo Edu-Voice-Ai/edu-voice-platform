@@ -36,7 +36,7 @@ BEGIN
         'https://apexcollege.edu.in',
         'Asia/Kolkata',
         'Director Admissions',
-        '+919613886363',
+        '+919513886363',
         'admissions@apexcollege.edu.in',
         '{"city": "Bengaluru", "state": "Karnataka", "country": "India", "pincode": "560100"}'::jsonb,
         TRUE
@@ -120,9 +120,9 @@ BEGIN
     ) VALUES (
         v_phone_id,
         v_org_id,
-        '+919613886363',
+        '+919513886363',
         'exotel',
-        'eduvoiceagent1',
+        'eduvoiceai1',
         'IN',
         'active'
     ) ON CONFLICT (id) DO UPDATE SET
