@@ -36,7 +36,7 @@ BEGIN
         'https://apexcollege.edu.in',
         'Asia/Kolkata',
         'Director Admissions',
-        '+919513886363',
+        '+914045901132',
         'admissions@apexcollege.edu.in',
         '{"city": "Bengaluru", "state": "Karnataka", "country": "India", "pincode": "560100"}'::jsonb,
         TRUE
@@ -120,7 +120,7 @@ BEGIN
     ) VALUES (
         v_phone_id,
         v_org_id,
-        '+919513886363',
+        '+914045901132',
         'exotel',
         'eduvoiceai1',
         'IN',

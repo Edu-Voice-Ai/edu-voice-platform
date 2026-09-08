@@ -1,24 +1,23 @@
-# Aravind → Yasin: Final Exotel Account & DID Migration Report
+# Aravind → Yasin: Final Exotel Account & Sole DID Migration Report
 
 **Author:** Aravind (Backend Owner)  
 **Recipient:** Yasin (Gateway & Telephony Lead)  
 **Date:** September 8, 2026  
-**Status:** **100% PASS — ALL FINAL UPDATES COMPLETE & VERIFIED**  
+**Status:** **100% PASS — SOLE CANONICAL DID 040-459-01132 CONFIGURED & VERIFIED**  
 
 ---
 
 ## 1. Executive Summary
 
-All requested updates for the new Exotel account (`eduvoiceai1`) and phone numbers have been fully applied and verified in the production database and runtime gateway environment on AWS (`3.105.228.104`).
+As requested, **`040-459-01132`** (`+914045901132`) is now configured as the **sole active canonical DID** in the production Supabase PostgreSQL database and mapped authoritatively to **Apex Engineering College** and **Maya — Admission Counselor**.
 
-Both **`095-138-86363`** (`+919513886363`) and **`040-459-01132`** (`+914045901132`) are registered and mapped authoritatively to **Apex Engineering College** and **Maya — Admission Counselor**. All database references (including organization primary contact phone) have been updated, and the new Exotel account credentials are active in the gateway runtime.
+All other test/temporary DIDs (including `095-138-86363` and `096-138-86363`) have been completely purged from active assignments and phone records. In addition, `organizations.primary_contact_phone` has been updated to `+914045901132`, and the new Exotel account credentials (`eduvoiceai1`) are loaded and active in the gateway runtime.
 
 ### Verification Matrix
 
 ```text
-DID Registration (+919513886363): PASS
-DID Registration (+914045901132): PASS
-DID Registration (+919613886363): PASS (Retained as active)
+DID Registration (+914045901132): PASS (Active)
+Old DID Purge (+919513886363):    PASS (404 DID_NOT_FOUND)
 DID Resolver (POST /resolve-did): PASS (HTTP 200 OK)
 Organization Mapping:             PASS (Apex Engineering College)
 Agent Mapping:                    PASS (Maya — Admission Counselor)
@@ -33,15 +32,14 @@ Gateway Cloudflare Webhook:       PASS (HTTP 200 OK with WSS stream)
 
 | Property | Value |
 | :--- | :--- |
-| **New Inbound ExoPhone** | `095-138-86363` (`+919513886363`) |
-| **Secondary ExoPhone** | `040-459-01132` (`+914045901132`) |
+| **Sole Inbound ExoPhone** | `040-459-01132` (`+914045901132`) |
 | **Exotel Account SID** | `eduvoiceai1` |
 | **Provider** | `exotel` |
 | **Country Code** | `IN` |
 | **Status** | `active` |
 | **Organization** | `Apex Engineering College` (`a0000000-0000-0000-0000-000000000001`) |
 | **Agent** | `Maya — Admission Counselor` (`c0000000-0000-0000-0000-000000000001`) |
-| **Organization Contact Phone** | Updated to `+919513886363` |
+| **Organization Contact Phone** | `+914045901132` |
 
 ---
 
@@ -58,10 +56,8 @@ X-Internal-Service-Key: <SHARED_INTERNAL_SECRET>
 ```
 
 ### C. Live Test Requests
-Tested with all input formats:
-1. `{"phone_number": "+919513886363"}` $\rightarrow$ **HTTP 200 OK**
-2. `{"phone_number": "095-138-86363"}` $\rightarrow$ **HTTP 200 OK**
-3. `{"phone_number": "040-459-01132"}` $\rightarrow$ **HTTP 200 OK**
+1. **Valid DID (`040-459-01132` or `+914045901132`):** $\rightarrow$ **HTTP 200 OK**
+2. **Purged DID (`095-138-86363`):** $\rightarrow$ **HTTP 404 DID_NOT_FOUND** (Fail-closed verified)
 
 ### D. Verified Authoritative Response Payload (HTTP 200)
 
@@ -70,7 +66,7 @@ Tested with all input formats:
   "success": true,
   "data": {
     "found": true,
-    "phone_number": "+919513886363",
+    "phone_number": "+914045901132",
     "organization_id": "a0000000-0000-0000-0000-000000000001",
     "organization_name": "Apex Engineering College",
     "organization_slug": "apex-college",
@@ -121,8 +117,10 @@ Tested with all input formats:
 ## 4. Live Gateway & Webhook Resolution
 
 Tested on public Cloudflare tunnel `https://gateway.gentechs.in/api/v1/telephony/exotel/resolve`:
-* **Call to `095-138-86363`:** Returns `200 OK` with WebSocket streaming URL.
-* **Call to `040-459-01132`:** Returns `200 OK` with WebSocket streaming URL.
+* **Call to `040-459-01132` (`CallTo=04045901132`):** Returns `200 OK` with WebSocket streaming URL:
+  ```json
+  {"url":"wss://gateway.gentechs.in/ws/telephony/stream/exotel_test_final_040459_01_134a3f3d540f"}
+  ```
 
 ---
 
@@ -131,6 +129,6 @@ Tested on public Cloudflare tunnel `https://gateway.gentechs.in/api/v1/telephony
 Aravind's backend configuration is **100% COMPLETE**.
 
 You can proceed with the physical inbound call:
-* Dial: **`095-138-86363`** (or `040-459-01132`).
-* Exotel connects to `https://gateway.gentechs.in/api/v1/telephony/exotel/resolve`.
+* Dial: **`040-459-01132`** (or `+914045901132`).
+* Exotel routes incoming call to `https://gateway.gentechs.in/api/v1/telephony/exotel/resolve`.
 * Gateway queries Backend, receives Maya's configuration, and streams audio to `wss://voice-test.gentechs.in/ws/voice`.
