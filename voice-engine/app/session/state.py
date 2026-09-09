@@ -43,6 +43,16 @@ class GreetingStateEnum(str, Enum):
     COMPLETED = "COMPLETED"
 
 
+class HandoffStateEnum(str, Enum):
+    IDLE = "IDLE"
+    REQUESTED = "REQUESTED"
+    AWAITING_TRANSFER = "AWAITING_TRANSFER"
+    FALLBACK_RECOVERY = "FALLBACK_RECOVERY"
+    TRANSFERRED = "TRANSFERRED"
+    CANCELLED = "CANCELLED"
+
+
+
 @dataclass
 class EphemeralTurnState:
     """Ephemeral state for an ongoing turn cycle."""
@@ -83,6 +93,10 @@ class SessionState:
     greeting_message: Optional[str] = None
     goodbye_message: Optional[str] = None
     client_sample_rate: int = 16000
+    speech_config: Optional[Dict[str, Any]] = None
+    handoff_config: Optional[Dict[str, Any]] = None
+    allow_barge_in: bool = True
+    max_call_duration_seconds: Optional[int] = None
     created_at_ms: float = field(default_factory=lambda: time.time() * 1000)
     is_active: bool = True
     user_has_floor: bool = False
@@ -92,6 +106,14 @@ class SessionState:
             self.institution_name = self.business_name
         elif self.institution_name != "Apex University" and self.business_name == "Apex University":
             self.business_name = self.institution_name
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if call duration has exceeded max_call_duration_seconds."""
+        if self.max_call_duration_seconds is not None and self.max_call_duration_seconds > 0:
+            elapsed_sec = (time.time() * 1000 - self.created_at_ms) / 1000.0
+            return elapsed_sec >= self.max_call_duration_seconds
+        return False
 
     def get_greeting_text(self) -> str:
         """Resolve greeting text using the active agent template or configuration."""
@@ -125,6 +147,14 @@ class SessionState:
     extracted_lead: Dict[str, Any] = field(default_factory=dict)
     handoff_requested: bool = False
     handoff_reason: Optional[str] = None
+    handoff_state: HandoffStateEnum = HandoffStateEnum.IDLE
+    handoff_requested_role: Optional[str] = None
+    handoff_requested_department: Optional[str] = None
+    handoff_confidence: float = 0.0
+    handoff_requested_at_ms: float = 0.0
+    handoff_acknowledged_at_ms: float = 0.0
+    handoff_hold_media: bool = False
+    out_of_scope_turn_count: int = 0
     call_summary: Optional[str] = None
     
     # Conversation & Lifecycle State
@@ -365,10 +395,53 @@ class SessionState:
         msg = {"role": role, "content": content, "timestamp": time.time(), **kwargs}
         self.messages.append(msg)
 
+    def can_trigger_handoff(self) -> bool:
+        """Ensure idempotency: once handoff is initiated, lock out repeated triggers."""
+        return self.handoff_state == HandoffStateEnum.IDLE and not self.handoff_requested
+
+    def record_handoff_requested(
+        self,
+        role: str,
+        department: str,
+        reason: str,
+        confidence: float = 0.95
+    ):
+        """Transition state machine to REQUESTED and record handoff metadata."""
+        self.handoff_state = HandoffStateEnum.REQUESTED
+        self.handoff_requested = True
+        self.handoff_requested_role = role
+        self.handoff_requested_department = department
+        self.handoff_reason = reason
+        self.handoff_confidence = confidence
+        self.handoff_requested_at_ms = time.time() * 1000
+
+    def record_handoff_acknowledged(self, hold_media: bool = True):
+        """Transition state machine to AWAITING_TRANSFER upon gateway confirmation."""
+        self.handoff_state = HandoffStateEnum.AWAITING_TRANSFER
+        self.handoff_hold_media = hold_media
+        self.handoff_acknowledged_at_ms = time.time() * 1000
+
+    def record_handoff_fallback(self):
+        """Transition state machine to FALLBACK_RECOVERY to resume conversation."""
+        self.handoff_state = HandoffStateEnum.FALLBACK_RECOVERY
+
+    def record_handoff_cancelled(self):
+        """Transition state machine to CANCELLED and allow conversation to resume."""
+        self.handoff_state = HandoffStateEnum.CANCELLED
+
+    def reset_handoff_to_idle(self):
+        """Reset handoff state back to IDLE after fallback or cancellation to resume normal conversation."""
+        self.handoff_state = HandoffStateEnum.IDLE
+        self.handoff_requested = False
+        self.handoff_hold_media = False
+        self.out_of_scope_turn_count = 0
+
     def close(self, reason: str = "Session closed"):
         """Close session and cancel active turn and generations."""
         self.is_active = False
         self.is_disconnected = True
+        if reason == "transferred_to_human":
+            self.handoff_state = HandoffStateEnum.TRANSFERRED
         self.invalidate_active_generation(reason=reason)
         if self.current_turn:
             self.current_turn.cancel(reason)
