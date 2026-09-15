@@ -92,14 +92,33 @@ def resample_16k_to_8k(pcm16_16k: bytes) -> bytes:
 
 def transcode_carrier_to_voice_engine(
     raw_audio: bytes,
-    encoding: str = "audio/x-mulaw",
+    encoding: str = "audio/x-l16",
     source_rate: int = 8000,
     target_rate: int = 16000,
 ) -> bytes:
-    """Transcode carrier inbound audio into canonical Voice Engine PCM16 (16kHz)."""
+    """Transcode carrier inbound audio into canonical Voice Engine PCM16 (16kHz).
+
+    Handles both raw 8kHz linear PCM16 (audio/x-l16, slin, 320 bytes per 20ms)
+    and G.711 mu-law (160 bytes per 20ms).
+    """
     enc_lower = encoding.lower()
-    if "mulaw" in enc_lower or "ulaw" in enc_lower or "pcmu" in enc_lower:
-        pcm = mulaw_to_pcm16(raw_audio)
+    is_explicit_pcm = (
+        "l16" in enc_lower
+        or "pcm" in enc_lower
+        or "slin" in enc_lower
+        or "raw" in enc_lower
+    )
+    is_mulaw = "mulaw" in enc_lower or "ulaw" in enc_lower or "pcmu" in enc_lower
+
+    if is_explicit_pcm:
+        pcm = raw_audio
+    elif is_mulaw:
+        # 320 bytes @ 8kHz is 160 samples of 16-bit PCM (20ms). If length is 320 bytes,
+        # it is raw PCM16 from carrier rather than 8-bit mu-law (which would be 160 bytes).
+        if len(raw_audio) == 320 and source_rate == 8000:
+            pcm = raw_audio
+        else:
+            pcm = mulaw_to_pcm16(raw_audio)
     else:
         pcm = raw_audio
 
@@ -110,10 +129,14 @@ def transcode_carrier_to_voice_engine(
 
 def transcode_voice_engine_to_carrier(
     pcm16_16k: bytes,
-    target_encoding: str = "audio/x-mulaw",
+    target_encoding: str = "audio/x-l16",
     target_rate: int = 8000,
 ) -> bytes:
-    """Transcode Voice Engine PCM16 (16kHz) audio into target carrier format."""
+    """Transcode Voice Engine PCM16 (16kHz) audio into target carrier format.
+
+    For Exotel AgentStream Voicebot (audio/x-l16), downsamples 16kHz PCM16 to 8kHz PCM16
+    and returns raw signed 16-bit little-endian PCM without mu-law compression.
+    """
     enc_lower = target_encoding.lower()
     if target_rate == 8000:
         pcm = resample_16k_to_8k(pcm16_16k)

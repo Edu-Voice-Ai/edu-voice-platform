@@ -22,6 +22,11 @@ class VoiceEngineEventType(str, Enum):
     SESSION_END = "session.end"
     LEAD_EXTRACTED = "lead.extracted"
     CALL_SUMMARY = "call.summary"
+    HUMAN_HANDOFF_REQUEST = "human_handoff.request"
+    HANDOFF_REQUESTED = "handoff.requested"
+    HANDOFF_ACKNOWLEDGED = "handoff.acknowledged"
+    HANDOFF_FALLBACK = "handoff.fallback"
+    HANDOFF_CANCELLED = "handoff.cancelled"
     ERROR = "error"
 
 
@@ -132,6 +137,58 @@ class SessionEndPayload(BaseModel):
         default=VoiceEngineEventType.SESSION_END.value,
         description="Must be session.end",
     )
+    session_id: str | None = Field(default=None, description="Unique session identifier")
+    call_id: str | None = Field(default=None, description="Unique call identifier")
+    reason: str = Field(
+        default="normal_closure",
+        description="Reason for termination, e.g. transferred_to_human, caller_hangup",
+    )
+
+
+class HandoffAcknowledgedPayload(BaseModel):
+    """handoff.acknowledged frame sent by Gateway to Voice Engine upon accepting handoff."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    event: str = Field(
+        default=VoiceEngineEventType.HANDOFF_ACKNOWLEDGED.value,
+        description="Must be handoff.acknowledged",
+    )
+    session_id: str | None = Field(default=None)
+    call_id: str | None = Field(default=None)
+    status: str = Field(default="resolving_target")
+    hold_media: bool = Field(default=True)
+
+
+class HandoffFallbackPayload(BaseModel):
+    """handoff.fallback frame sent by Gateway to Voice Engine when handoff cannot complete."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    event: str = Field(
+        default=VoiceEngineEventType.HANDOFF_FALLBACK.value,
+        description="Must be handoff.fallback",
+    )
+    session_id: str | None = Field(default=None)
+    call_id: str | None = Field(default=None)
+    reason: str = Field(default="NO_ELIGIBLE_STAFF")
+    prompt_instruction: str | None = Field(
+        default="Apologize politely that all admission counselors are busy on other calls. Offer to take a message or schedule a callback.",
+    )
+
+
+class HandoffCancelledPayload(BaseModel):
+    """handoff.cancelled frame sent by Gateway to Voice Engine on caller hangup during transfer."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    event: str = Field(
+        default=VoiceEngineEventType.HANDOFF_CANCELLED.value,
+        description="Must be handoff.cancelled",
+    )
+    session_id: str | None = Field(default=None)
+    call_id: str | None = Field(default=None)
+    reason: str | None = Field(default="caller_hung_up")
 
 
 # ==============================================================================
@@ -255,6 +312,53 @@ class CallSummaryEvent(BaseVoiceEngineEvent):
         if self.summary_payload is not None:
             return self.summary_payload
         return self.data.get("summary", {}) if isinstance(self.data, dict) else {}
+
+
+class HandoffRequestedEvent(BaseVoiceEngineEvent):
+    """Canonical handoff.requested event emitted when AI determines real human forwarding is required."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    event: str = Field(default=VoiceEngineEventType.HANDOFF_REQUESTED.value)
+    handoff_id: str | None = Field(default=None, description="Correlated handoff identifier")
+    call_id: str | None = Field(default=None, description="Correlated call identifier")
+    organization_id: str | None = Field(default=None, description="Tenant organization identifier")
+    agent_id: str | None = Field(default=None, description="Assigned AI agent identifier")
+    requested_role: str | None = Field(
+        default="admission_counselor",
+        description="Role requested for transfer (e.g. admission_counselor, accounts, warden)",
+    )
+    requested_department: str | None = Field(
+        default="admissions",
+        description="Department requested for transfer",
+    )
+    requested_staff_id: str | None = Field(
+        default=None,
+        alias="staff_id",
+        description="Specific staff member ID requested if known",
+    )
+    caller_phone_number: str | None = Field(
+        default=None,
+        description="Caller's phone number",
+    )
+    reason: str | None = Field(
+        default="caller_requested_human",
+        description="Reason triggering human transfer (e.g. caller_requested_human, complex_query)",
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="Confidence score of handoff intent detection (0.0 - 1.0)",
+    )
+    target_phone_number: str | None = Field(
+        default=None,
+        description="Legacy transfer number suggestion (ignored in favor of Backend resolution)",
+    )
+
+
+class HumanHandoffRequestEvent(HandoffRequestedEvent):
+    """Backward-compatibility wrapper for legacy human_handoff.request event."""
+
+    event: str = Field(default=VoiceEngineEventType.HUMAN_HANDOFF_REQUEST.value)
 
 
 class VoiceEngineErrorEvent(BaseModel):

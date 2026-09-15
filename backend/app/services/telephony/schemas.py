@@ -161,6 +161,6 @@ class HealthResponse(BaseModel):
     """Application process health response."""
 
     status: str = Field(default="ok")
-    service: str = Field(default="edu-voice-ai-backend")
+    service: str = Field(default="edu-voice-ai-gateway")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     environment: str = Field(default="development")

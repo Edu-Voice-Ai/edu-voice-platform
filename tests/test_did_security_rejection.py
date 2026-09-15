@@ -99,7 +99,7 @@ class MockExplodingResolver(PhoneAssignmentResolver):
             )
         if self.mode == "MALFORMED":
             raise GatewayError(
-                code=GatewayErrorCode.PROVIDER_ERROR,
+                code=GatewayErrorCode.INTERNAL_ERROR,
                 message="Malformed payload response from backend service",
             )
         if self.mode == "MISSING_ORG":
@@ -318,10 +318,12 @@ def test_caller_supplied_tenant_id_is_strictly_ignored(clean_session_manager) ->
 
 def test_no_internal_backend_secrets_or_stacktraces_leaked_on_error() -> None:
     """Verify internal backend URLs, service keys, and Python stacktraces are never leaked to caller."""
+    from pydantic import SecretStr
+
     call_sid = "call_leak_test"
     test_settings = TelephonySettings(
-        backend_url="http://internal-secure-backend.cluster.local:8080",
-        backend_service_key="secret_very_private_jwt_key_xyz",
+        backend_internal_url="http://internal-secure-backend.cluster.local:8080",
+        internal_service_key=SecretStr("secret_very_private_jwt_key_xyz"),
         environment="test",
     )
     resolver = MockExplodingResolver(mode="UNAUTHORIZED_INTERNAL_SERVICE")

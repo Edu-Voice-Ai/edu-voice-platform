@@ -16,8 +16,13 @@ from backend.app.services.telephony.config import (
     get_telephony_settings,
 )
 from backend.app.services.telephony.errors import GatewayError, GatewayErrorCode
+from backend.app.services.telephony.logging import (
+    StructuredGatewayLogger,
+    mask_identifier,
+)
 
 logger = logging.getLogger("telephony.exotel.client")
+slog = StructuredGatewayLogger("telephony.exotel.client")
 
 
 @dataclass(frozen=True)
@@ -149,15 +154,33 @@ class ExotelApiClient:
 
         url = f"{self.base_url}/v1/Accounts/{self.account_sid}/Calls/{call_id}"
         auth = self._get_auth_tuple()
+        headers = {"Accept": "application/json"}
 
         client = await self._get_client()
         should_close = self._http_client is None
+        masked_target = mask_identifier(target_phone_number)
+        masked_call_id = mask_identifier(call_id)
+        slog.info(
+            "exotel_transfer_call_requested",
+            call_id=masked_call_id,
+            target_phone=masked_target,
+            account_sid=self.account_sid,
+        )
+
         try:
             payload = {
                 "PhoneNumber": target_phone_number,
                 "CallerId": self.exophone,
             }
-            resp = await client.post(url, data=payload, auth=auth)
+            resp = await client.post(url, data=payload, headers=headers, auth=auth)
+            resp_body_snippet = resp.text[:500]
+            slog.info(
+                "exotel_transfer_call_response",
+                call_id=masked_call_id,
+                status_code=resp.status_code,
+                response_body=resp_body_snippet,
+            )
+
             if resp.status_code in (200, 201, 202):
                 return {
                     "status": "transfer_initiated",
@@ -165,10 +188,39 @@ class ExotelApiClient:
                     "target_phone_number": target_phone_number,
                     "provider": "exotel",
                 }
+
+            # Parse error details safely
+            err_detail = resp_body_snippet
+            try:
+                err_json = resp.json()
+                if "RestException" in err_json:
+                    err_detail = str(err_json["RestException"].get("Message", resp_body_snippet))
+            except (ValueError, KeyError, TypeError):
+                logger.debug("Non-JSON or malformed error response from Exotel: %s", resp_body_snippet)
+
+            slog.error(
+                "exotel_transfer_call_failed",
+                call_id=masked_call_id,
+                status_code=resp.status_code,
+                error_detail=err_detail,
+            )
+
             raise GatewayError(
                 code=GatewayErrorCode.CONNECTION_FAILED,
-                message=f"Exotel call transfer failed with status {resp.status_code}",
+                message=f"Exotel call transfer failed with status {resp.status_code}: {err_detail}",
             )
+        except httpx.TimeoutException as exc:
+            slog.error("exotel_transfer_call_timeout", call_id=masked_call_id)
+            raise GatewayError(
+                code=GatewayErrorCode.TIMEOUT,
+                message=f"Exotel call transfer request timed out: {exc}",
+            ) from exc
+        except httpx.HTTPError as exc:
+            slog.error("exotel_transfer_call_http_error", call_id=masked_call_id, error=str(exc))
+            raise GatewayError(
+                code=GatewayErrorCode.SERVICE_UNAVAILABLE,
+                message=f"Exotel call transfer communication error: {exc}",
+            ) from exc
         finally:
             if should_close:
                 await client.aclose()

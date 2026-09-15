@@ -9,5 +9,6 @@ def test_health_endpoint_returns_ok(client: TestClient) -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert data["service"] == "edu-voice-ai-backend"
+    assert data["service"] == "edu-voice-ai-gateway"
+    assert data["environment"] == "test"
     assert "timestamp" in data

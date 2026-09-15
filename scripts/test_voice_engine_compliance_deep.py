@@ -7,6 +7,7 @@ import asyncio
 import base64
 import json
 import uuid
+
 import websockets
 
 WS_URL = "wss://voice-test.gentechs.in/ws/voice"
@@ -22,8 +23,6 @@ async def test_session_lifecycle_and_events():
     call_id = f"call_attribution_{uuid.uuid4().hex[:8]}"
     org_id = "org_gentechs_compliance"
     agent_id = "agent_compliance_01"
-    camp_id = "camp_admissions_q3"
-    contact_id = "cnt_lead_555"
 
     start_payload = {
         "event": "session.start",
@@ -31,9 +30,7 @@ async def test_session_lifecycle_and_events():
         "call_id": call_id,
         "organization_id": org_id,
         "agent_id": agent_id,
-        "call_direction": "outbound",
-        "campaign_id": camp_id,
-        "contact_id": contact_id,
+        "call_direction": "inbound",
         "language": "en-IN",
         "client_sample_rate": 16000,
         "template_type": "education",
@@ -45,7 +42,7 @@ async def test_session_lifecycle_and_events():
         log(f"[1] Connected to {WS_URL}")
         # Send session.start
         await ws.send(json.dumps(start_payload))
-        log("[2] Sent session.start with outbound & attribution metadata")
+        log("[2] Sent session.start with inbound metadata")
 
         first_audio = None
         audio_count = 0

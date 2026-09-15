@@ -9,6 +9,8 @@ import base64
 import binascii
 import json
 import logging
+import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -21,6 +23,10 @@ from backend.app.services.telephony.logging import StructuredGatewayLogger
 from backend.app.services.telephony.voice_engine_schemas import (
     AudioOutputEvent,
     CallSummaryEvent,
+    HandoffAcknowledgedPayload,
+    HandoffCancelledPayload,
+    HandoffFallbackPayload,
+    HandoffRequestedEvent,
     LeadExtractedEvent,
     ResponseCancelledEvent,
     ResponseEndEvent,
@@ -51,6 +57,7 @@ class VoiceEngineWsClient:
         on_response_end: Callable[[ResponseEndEvent], Awaitable[None]] | None = None,
         on_lead_extracted: Callable[[LeadExtractedEvent], Awaitable[None]] | None = None,
         on_call_summary: Callable[[CallSummaryEvent], Awaitable[None]] | None = None,
+        on_human_handoff: Callable[[HandoffRequestedEvent], Awaitable[None]] | None = None,
         on_error: Callable[[VoiceEngineErrorEvent], Awaitable[None]] | None = None,
     ) -> None:
         self.ws_url: str = ws_url
@@ -59,12 +66,13 @@ class VoiceEngineWsClient:
         self.connect_timeout_seconds: float = connect_timeout_seconds
         self.init_timeout_seconds: float = init_timeout_seconds
 
-        self.outbound_queue: asyncio.Queue[AudioFrame] = outbound_queue or asyncio.Queue(maxsize=100)
+        self.outbound_queue: asyncio.Queue[AudioFrame] = outbound_queue or asyncio.Queue(maxsize=500)
         self.on_audio_output: Callable[[AudioOutputEvent, AudioFrame], Awaitable[None]] | None = on_audio_output
         self.on_response_cancelled: Callable[[ResponseCancelledEvent], Awaitable[None]] | None = on_response_cancelled
         self.on_response_end: Callable[[ResponseEndEvent], Awaitable[None]] | None = on_response_end
         self.on_lead_extracted: Callable[[LeadExtractedEvent], Awaitable[None]] | None = on_lead_extracted
         self.on_call_summary: Callable[[CallSummaryEvent], Awaitable[None]] | None = on_call_summary
+        self.on_human_handoff: Callable[[HandoffRequestedEvent], Awaitable[None]] | None = on_human_handoff
         self.on_error: Callable[[VoiceEngineErrorEvent], Awaitable[None]] | None = on_error
 
         self._ws: Any = None
@@ -76,6 +84,10 @@ class VoiceEngineWsClient:
         # Barge-in generation tracking
         self.cancelled_generations: set[str] = set()
         self.active_generation_id: str | None = None
+
+        # Streaming text buffering and tool-call handoff tracking
+        self._text_buffers: dict[str, str] = {}
+        self._handoff_triggered: bool = False
 
         # Post-call captured data
         self.latest_lead: dict[str, Any] | None = None
@@ -102,6 +114,7 @@ class VoiceEngineWsClient:
             business_name=self.start_payload.business_name,
         )
 
+        t_ve_conn_start = time.perf_counter_ns()
         try:
             # 1. Connect over WebSocket with timeout
             connect_coro = websockets.connect(
@@ -112,6 +125,7 @@ class VoiceEngineWsClient:
                 max_size=2 * 1024 * 1024,  # 2MB max frame size
             )
             self._ws = await asyncio.wait_for(connect_coro, timeout=self.connect_timeout_seconds)
+            t_ve_conn_done = time.perf_counter_ns()
         except asyncio.TimeoutError as exc:
             slog.error("voice_engine_connect_timeout", session_id=self.session_id, ws_url=self.ws_url)
             raise GatewayError(
@@ -132,9 +146,11 @@ class VoiceEngineWsClient:
         )
 
         # 3. Transmit session.start payload immediately
+        t_start_send_begin = time.perf_counter_ns()
         try:
             start_json = self.start_payload.model_dump_json()
             await self._ws.send(start_json)
+            t_start_send_done = time.perf_counter_ns()
             slog.info("voice_engine_session_start_sent", session_id=self.session_id)
         except Exception as exc:
             await self.close(reason="session_start_send_failed")
@@ -146,7 +162,19 @@ class VoiceEngineWsClient:
         # 4. Await session.ready event with timeout
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=self.init_timeout_seconds)
-            slog.info("voice_engine_session_ready", session_id=self.session_id)
+            t_session_ready_done = time.perf_counter_ns()
+            slog.info(
+                "voice_engine_session_ready",
+                session_id=self.session_id,
+            )
+            slog.info(
+                "gateway_voice_engine_handshake_timing",
+                session_id=self.session_id,
+                step7_ve_connection_ms=round((t_ve_conn_done - t_ve_conn_start) / 1_000_000, 2),
+                step8_session_start_send_ms=round((t_start_send_done - t_start_send_begin) / 1_000_000, 2),
+                step9_session_ready_ms=round((t_session_ready_done - t_start_send_done) / 1_000_000, 2),
+                total_handshake_ms=round((t_session_ready_done - t_ve_conn_start) / 1_000_000, 2),
+            )
         except asyncio.TimeoutError as exc:
             slog.error("voice_engine_init_timeout", session_id=self.session_id)
             await self.close(reason="session_ready_timeout")
@@ -235,10 +263,10 @@ class VoiceEngineWsClient:
             out_evt = AudioOutputEvent.model_validate(payload)
             generation_id = out_evt.generation_id or ""
 
-            # Drop audio if this generation was already cancelled via barge-in
-            if generation_id and generation_id in self.cancelled_generations:
+            # Drop audio if handoff in progress or generation was already cancelled via barge-in
+            if self._handoff_triggered or (generation_id and generation_id in self.cancelled_generations):
                 logger.debug(
-                    "Dropping audio chunk for cancelled generation %s (session %s)",
+                    "Dropping audio chunk for cancelled/handoff generation %s (session %s)",
                     generation_id,
                     self.session_id,
                 )
@@ -275,7 +303,16 @@ class VoiceEngineWsClient:
             try:
                 self.outbound_queue.put_nowait(frame)
             except (asyncio.QueueFull, ValueError):
-                logger.warning("Voice Engine outbound queue full; frame dropped for session %s", self.session_id)
+                # Bounded backpressure: producer temporarily ahead of 20ms carrier consumer loop.
+                # Allow a brief wait up to 100ms for consumer to drain a frame.
+                try:
+                    await asyncio.wait_for(self.outbound_queue.put(frame), timeout=0.10)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    logger.warning(
+                        "Voice Engine outbound queue full after wait; frame dropped for session %s (generation=%s)",
+                        self.session_id,
+                        generation_id,
+                    )
             if not hasattr(self, "_audio_out_frames"):
                 self._audio_out_frames = 0
             self._audio_out_frames += 1
@@ -290,6 +327,75 @@ class VoiceEngineWsClient:
 
             if self.on_audio_output is not None:
                 await self.on_audio_output(out_evt, frame)
+
+        elif event_type == "response.text.delta":
+            delta_str = ""
+            data_field = payload.get("data")
+            if isinstance(data_field, dict):
+                delta_str = str(data_field.get("delta") or data_field.get("text") or "")
+            elif isinstance(data_field, str):
+                delta_str = data_field
+            elif "delta" in payload:
+                delta_str = str(payload.get("delta") or "")
+
+            generation_id = payload.get("generation_id") or self.active_generation_id or "current"
+            self._text_buffers[generation_id] = self._text_buffers.get(generation_id, "") + delta_str
+            accumulated = self._text_buffers[generation_id]
+
+            # Detect tool call XML or function invocation from Voice Engine LLM
+            is_handoff_tool = False
+            if "<tool_call>" in accumulated:
+                tool_match = re.search(r"<tool_call>[\s\n]*([a-zA-Z0-9_\-]+)", accumulated)
+                if (
+                    tool_match
+                    and any(
+                        kw in tool_match.group(1).lower()
+                        for kw in ("transfer", "human", "handoff", "counselor", "agent")
+                    )
+                ) or any(
+                    kw in accumulated.lower()
+                    for kw in ("transfer_to_human", "request_human_handoff", "human_handoff")
+                ):
+                    is_handoff_tool = True
+            elif any(
+                kw in accumulated.lower()
+                for kw in ("<tool_call>transfer", "transfer_to_human_agent", "request_human_handoff")
+            ):
+                is_handoff_tool = True
+
+            if is_handoff_tool:
+                # 1. Immediately cancel this generation & purge queue so caller never hears "arg_value" / "R value"
+                if generation_id and generation_id != "current":
+                    self.cancelled_generations.add(generation_id)
+                    self._drain_cancelled_audio(generation_id)
+                if self.active_generation_id:
+                    self.cancelled_generations.add(self.active_generation_id)
+                    self._drain_cancelled_audio(self.active_generation_id)
+
+                # 2. Extract reason and trigger handoff event only once
+                if not self._handoff_triggered:
+                    reason_match = re.search(r"<arg_value>(.*?)(?:</arg_value>|$)", accumulated, re.DOTALL)
+                    reason = reason_match.group(1).strip() if reason_match else "caller_requested_human"
+
+                    if "</tool_call>" in accumulated or reason_match or len(accumulated) > 60:
+                        self._handoff_triggered = True
+                        handoff_evt = HandoffRequestedEvent(
+                            event=VoiceEngineEventType.HANDOFF_REQUESTED,
+                            session_id=self.session_id,
+                            call_id=self.start_payload.call_id or self.session_id,
+                            organization_id=self.start_payload.organization_id or "",
+                            agent_id=self.start_payload.agent_id or "",
+                            reason=reason or "caller_requested_human",
+                        )
+                        slog.info(
+                            "voice_engine_tool_call_handoff_detected",
+                            session_id=self.session_id,
+                            call_id=handoff_evt.call_id,
+                            reason=handoff_evt.reason,
+                            generation_id=generation_id,
+                        )
+                        if self.on_human_handoff is not None:
+                            await self.on_human_handoff(handoff_evt)
 
         elif event_type == VoiceEngineEventType.RESPONSE_CANCELLED.value:
             cancel_evt = ResponseCancelledEvent.model_validate(payload)
@@ -314,6 +420,32 @@ class VoiceEngineWsClient:
         elif event_type == VoiceEngineEventType.RESPONSE_END.value:
             end_evt = ResponseEndEvent.model_validate(payload)
             self.latest_latencies = end_evt.data
+
+            # Check if an unclosed handoff tool call was pending in the text buffer
+            if not self._handoff_triggered:
+                for gen_id, text in list(self._text_buffers.items()):
+                    if "<tool_call>" in text and any(kw in text.lower() for kw in ("transfer", "human", "handoff")):
+                        self._handoff_triggered = True
+                        reason_match = re.search(r"<arg_value>(.*?)(?:</arg_value>|$)", text, re.DOTALL)
+                        reason = reason_match.group(1).strip() if reason_match else "caller_requested_human"
+                        handoff_evt = HandoffRequestedEvent(
+                            event=VoiceEngineEventType.HANDOFF_REQUESTED,
+                            session_id=self.session_id,
+                            call_id=self.start_payload.call_id or self.session_id,
+                            organization_id=self.start_payload.organization_id or "",
+                            agent_id=self.start_payload.agent_id or "",
+                            reason=reason,
+                        )
+                        slog.info(
+                            "voice_engine_tool_call_handoff_detected_on_response_end",
+                            session_id=self.session_id,
+                            call_id=handoff_evt.call_id,
+                            reason=handoff_evt.reason,
+                        )
+                        if self.on_human_handoff is not None:
+                            await self.on_human_handoff(handoff_evt)
+            self._text_buffers.clear()
+
             slog.info(
                 "voice_engine_response_end",
                 session_id=self.session_id,
@@ -344,6 +476,41 @@ class VoiceEngineWsClient:
             )
             if self.on_call_summary is not None:
                 await self.on_call_summary(summary_evt)
+
+        elif event_type in (
+            VoiceEngineEventType.HANDOFF_REQUESTED.value,
+            VoiceEngineEventType.HUMAN_HANDOFF_REQUEST.value,
+            "human_handoff",
+            "human_handoff_requested",
+            "request_human_handoff",
+            "transfer_to_human_agent",
+        ):
+            self._handoff_triggered = True
+            if self.active_generation_id:
+                self.cancelled_generations.add(self.active_generation_id)
+                self._drain_cancelled_audio(self.active_generation_id)
+
+            handoff_evt = HandoffRequestedEvent.model_validate(payload)
+            if not handoff_evt.call_id and self.start_payload.call_id:
+                handoff_evt.call_id = self.start_payload.call_id
+            if not handoff_evt.organization_id and self.start_payload.organization_id:
+                handoff_evt.organization_id = self.start_payload.organization_id
+            if not handoff_evt.agent_id and self.start_payload.agent_id:
+                handoff_evt.agent_id = self.start_payload.agent_id
+
+            slog.info(
+                "voice_engine_human_handoff_requested",
+                session_id=self.session_id,
+                handoff_id=handoff_evt.handoff_id,
+                reason=handoff_evt.reason,
+                call_id=handoff_evt.call_id,
+                org_id=handoff_evt.organization_id,
+                agent_id=handoff_evt.agent_id,
+                requested_role=handoff_evt.requested_role,
+                requested_dept=handoff_evt.requested_department,
+            )
+            if self.on_human_handoff is not None:
+                await self.on_human_handoff(handoff_evt)
 
         elif event_type == VoiceEngineEventType.ERROR.value:
             err_evt = VoiceEngineErrorEvent.model_validate(payload)
@@ -383,7 +550,114 @@ class VoiceEngineWsClient:
 
         return drained_count
 
-    async def close_session(self, drain_timeout_seconds: float = 1.0) -> None:
+    async def send_handoff_acknowledged(
+        self,
+        call_id: str | None = None,
+        status: str = "resolving_target",
+        hold_media: bool = True,
+    ) -> None:
+        """Send handoff.acknowledged frame to Voice Engine upon accepting handoff."""
+        if self._ws is not None and not self._close_event.is_set():
+            payload = HandoffAcknowledgedPayload(
+                session_id=self.session_id,
+                call_id=call_id or self.start_payload.call_id,
+                status=status,
+                hold_media=hold_media,
+            )
+            try:
+                async with self._send_lock:
+                    await self._ws.send(payload.model_dump_json())
+                slog.info(
+                    "voice_engine_handoff_acknowledged_sent",
+                    session_id=self.session_id,
+                    call_id=payload.call_id,
+                    status=status,
+                )
+            except (ConnectionClosed, OSError, RuntimeError) as exc:
+                logger.debug("Error sending handoff.acknowledged to Voice Engine: %s", exc)
+
+    async def send_handoff_fallback(
+        self,
+        call_id: str | None = None,
+        reason: str = "NO_ELIGIBLE_STAFF",
+        prompt_instruction: str | None = None,
+    ) -> None:
+        """Send handoff.fallback frame to Voice Engine to resume AI dialogue on failure."""
+        self._handoff_triggered = False
+        if self._ws is not None and not self._close_event.is_set():
+            payload = HandoffFallbackPayload(
+                session_id=self.session_id,
+                call_id=call_id or self.start_payload.call_id,
+                reason=reason,
+                prompt_instruction=prompt_instruction
+                or "Apologize politely that all admission counselors are busy on other calls. Offer to take a message or schedule a callback.",
+            )
+            try:
+                async with self._send_lock:
+                    await self._ws.send(payload.model_dump_json())
+                slog.info(
+                    "voice_engine_handoff_fallback_sent",
+                    session_id=self.session_id,
+                    call_id=payload.call_id,
+                    reason=reason,
+                )
+            except (ConnectionClosed, OSError, RuntimeError) as exc:
+                logger.debug("Error sending handoff.fallback to Voice Engine: %s", exc)
+
+    async def send_handoff_cancelled(
+        self,
+        call_id: str | None = None,
+        reason: str | None = "caller_hung_up",
+    ) -> None:
+        """Send handoff.cancelled frame to Voice Engine if caller hangs up during bridge."""
+        if self._ws is not None and not self._close_event.is_set():
+            payload = HandoffCancelledPayload(
+                session_id=self.session_id,
+                call_id=call_id or self.start_payload.call_id,
+                reason=reason,
+            )
+            try:
+                async with self._send_lock:
+                    await self._ws.send(payload.model_dump_json())
+                slog.info(
+                    "voice_engine_handoff_cancelled_sent",
+                    session_id=self.session_id,
+                    call_id=payload.call_id,
+                    reason=reason,
+                )
+            except (ConnectionClosed, OSError, RuntimeError) as exc:
+                logger.debug("Error sending handoff.cancelled to Voice Engine: %s", exc)
+
+    async def send_session_end(
+        self,
+        reason: str = "normal_closure",
+        call_id: str | None = None,
+    ) -> None:
+        """Explicitly transmit session.end to downstream Voice Engine."""
+        if self._ws is not None and not self._close_event.is_set():
+            try:
+                end_payload = SessionEndPayload(
+                    session_id=self.session_id,
+                    call_id=call_id or self.start_payload.call_id,
+                    reason=reason,
+                )
+                async with self._send_lock:
+                    await self._ws.send(end_payload.model_dump_json())
+                slog.info(
+                    "voice_engine_session_end_sent",
+                    session_id=self.session_id,
+                    reason=reason,
+                    call_id=end_payload.call_id,
+                )
+            except (ConnectionClosed, OSError, RuntimeError) as exc:
+                logger.debug("Error transmitting session.end to Voice Engine: %s", exc)
+
+    async def close_session(
+        self,
+        drain_timeout_seconds: float = 1.0,
+        reason: str = "normal_closure",
+        call_id: str | None = None,
+    ) -> None:
         """Send session.end, wait briefly for post-call intelligence events, and close socket."""
         if self._close_event.is_set():
             return
@@ -391,9 +665,19 @@ class VoiceEngineWsClient:
         if self._ws is not None:
             try:
                 # 1. Send session.end JSON frame
-                end_payload = SessionEndPayload()
-                await self._ws.send(end_payload.model_dump_json())
-                slog.info("voice_engine_session_end_sent", session_id=self.session_id)
+                end_payload = SessionEndPayload(
+                    session_id=self.session_id,
+                    call_id=call_id or self.start_payload.call_id,
+                    reason=reason,
+                )
+                async with self._send_lock:
+                    await self._ws.send(end_payload.model_dump_json())
+                slog.info(
+                    "voice_engine_session_end_sent",
+                    session_id=self.session_id,
+                    reason=reason,
+                    call_id=end_payload.call_id,
+                )
 
                 # 2. Yield briefly to allow lead.extracted / call.summary frames to arrive
                 if drain_timeout_seconds > 0:

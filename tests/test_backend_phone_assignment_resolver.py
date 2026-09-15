@@ -365,3 +365,123 @@ async def test_session_initialization_with_resolved_agent_config():
     assert session.agent_id == "agent_maya"
     assert session.agent_config.voice_id == "qwen3_voice"
     assert session.agent_config.welcome_message == "Welcome to Apex University!"
+
+
+@pytest.mark.asyncio
+async def test_canonical_request_payload_and_headers():
+    """Verify strictly canonical POST /api/v1/internal/telephony/resolve-did request format."""
+    import json
+
+    captured_requests = []
+
+    def capture_handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(
+            status_code=200,
+            json={
+                "success": True,
+                "data": {
+                    "phone_number": "+918047361234",
+                    "organization_id": "org_canonical_1",
+                    "agent_id": "agent_canonical_1",
+                    "speech_config": {
+                        "primary_language": "en-IN",
+                        "voice_id": "qwen_voice_01",
+                    },
+                    "handoff_config": {
+                        "human_handoff_enabled": True,
+                        "human_handoff_number": "+919876543210",
+                    },
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(capture_handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        resolver = BackendPhoneAssignmentResolver(
+            backend_url="http://edu-voice-ai-backend:8000",
+            internal_service_key="secret_shared_key_abc",
+            client=client,
+        )
+        await resolver.resolve_phone_assignment(
+            PhoneAssignmentRequest(phone_number="+918047361234")
+        )
+
+    assert len(captured_requests) == 1
+    req = captured_requests[0]
+    assert req.method == "POST"
+    assert req.url.path == "/api/v1/internal/telephony/resolve-did"
+    assert req.headers["X-Internal-Service-Key"] == "secret_shared_key_abc"
+    assert req.headers["Content-Type"] == "application/json"
+
+    body = json.loads(req.content)
+    # Must contain ONLY phone_number; NEVER caller-supplied tenant/agent IDs
+    assert body == {"phone_number": "+918047361234"}
+    assert "organization_id" not in body
+    assert "agent_id" not in body
+    assert "tenant_id" not in body
+
+
+@pytest.mark.asyncio
+async def test_multi_did_tenant_isolation():
+    """Verify different DIDs map strictly to their respective tenant without crossover."""
+    did_db = {
+        "+918047361111": {
+            "organization_id": "org_alpha_edu",
+            "agent_id": "agent_alpha_bot",
+            "organization_name": "Alpha University",
+        },
+        "+918047362222": {
+            "organization_id": "org_beta_health",
+            "agent_id": "agent_beta_bot",
+            "organization_name": "Beta Healthcare",
+        },
+    }
+
+    def multi_handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        body = json.loads(request.content)
+        phone = body.get("phone_number")
+        if phone in did_db:
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "success": True,
+                    "data": {
+                        "phone_number": phone,
+                        "organization_id": did_db[phone]["organization_id"],
+                        "agent_id": did_db[phone]["agent_id"],
+                        "organization_name": did_db[phone]["organization_name"],
+                        "speech_config": {"voice_id": "voice_1"},
+                        "handoff_config": {"human_handoff_enabled": True},
+                    },
+                },
+            )
+        return httpx.Response(
+            status_code=404,
+            json={"success": False, "error": {"code": "DID_NOT_FOUND"}},
+        )
+
+    transport = httpx.MockTransport(multi_handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        resolver = BackendPhoneAssignmentResolver(
+            backend_url="http://edu-voice-ai-backend:8000",
+            internal_service_key="secret_shared_key",
+            client=client,
+        )
+
+        res_alpha = await resolver.resolve_phone_assignment(
+            PhoneAssignmentRequest(phone_number="+918047361111")
+        )
+        res_beta = await resolver.resolve_phone_assignment(
+            PhoneAssignmentRequest(phone_number="+918047362222")
+        )
+
+    # Verification: Each DID maps to distinct authoritative tenant/agent identity
+    assert res_alpha.organization_id == "org_alpha_edu"
+    assert res_alpha.agent_id == "agent_alpha_bot"
+    assert res_beta.organization_id == "org_beta_health"
+    assert res_beta.agent_id == "agent_beta_bot"
+    assert res_alpha.organization_id != res_beta.organization_id
+    assert res_alpha.agent_id != res_beta.agent_id

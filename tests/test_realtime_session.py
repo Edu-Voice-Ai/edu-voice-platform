@@ -29,8 +29,8 @@ async def test_session_creation_and_defaults() -> None:
     assert session.agent_id == "agent_xyz"
     assert session.connection_state == ConnectionState.DISCONNECTED
     assert session.lifecycle_state == CallSessionState.INITIATED
-    assert session.inbound_audio_queue.maxsize == 100
-    assert session.outbound_audio_queue.maxsize == 100
+    assert session.inbound_audio_queue.maxsize == 500
+    assert session.outbound_audio_queue.maxsize == 500
 
 
 @pytest.mark.asyncio

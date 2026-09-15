@@ -159,6 +159,7 @@ class WsVoiceEngineTransport(BaseVoiceEngineTransport):
         on_response_end: Any | None = None,
         on_lead_extracted: Any | None = None,
         on_call_summary: Any | None = None,
+        on_human_handoff: Any | None = None,
         on_error: Any | None = None,
     ) -> VoiceEngineWsClient:
         """Create and connect a new VoiceEngineWsClient instance."""
@@ -220,6 +221,7 @@ class WsVoiceEngineTransport(BaseVoiceEngineTransport):
                 on_response_end=on_response_end,
                 on_lead_extracted=on_lead_extracted,
                 on_call_summary=on_call_summary,
+                on_human_handoff=on_human_handoff,
                 on_error=on_error,
             )
 

@@ -69,21 +69,60 @@ def create_app() -> FastAPI:
     application.include_router(health_router, tags=["Health"])
     application.include_router(telephony_router, prefix="/api/v1")
 
-    # Realtime Voice Gateway WebSocket Endpoint
-    @application.websocket("/ws/telephony/stream/{session_id}")
-    async def websocket_stream_endpoint(
-        websocket: WebSocket,
-        session_id: str,
-    ) -> None:
-        """Realtime WebSocket Audio Streaming Gateway Endpoint."""
+    # Realtime Voice Gateway WebSocket Endpoints
+    async def _handle_gateway_ws(websocket: WebSocket, session_id: str | None = None) -> None:
+        from backend.app.api.v1.telephony import get_phone_assignment_resolver
         from backend.app.services.telephony.config import get_telephony_settings
+        from backend.app.services.telephony.routing.phone_assignment import (
+            BackendPhoneAssignmentResolver,
+        )
 
         settings_getter = application.dependency_overrides.get(
             get_telephony_settings, get_telephony_settings
         )
         active_settings = settings_getter()
-        gw = WebSocketAudioGateway(settings=active_settings)
+
+        resolver_getter = application.dependency_overrides.get(
+            get_phone_assignment_resolver, None
+        )
+        if resolver_getter is not None:
+            if callable(resolver_getter):
+                try:
+                    resolver = resolver_getter(settings=active_settings)
+                except TypeError:
+                    resolver = resolver_getter()
+            else:
+                resolver = resolver_getter
+        else:
+            resolver = BackendPhoneAssignmentResolver(settings=active_settings)
+
+        gw = WebSocketAudioGateway(
+            settings=active_settings,
+            phone_assignment_resolver=resolver,
+        )
         await gw.handle_stream(websocket=websocket, session_id=session_id)
+
+    @application.websocket("/ws/telephony/stream/{session_id}")
+    async def websocket_stream_session_endpoint(
+        websocket: WebSocket,
+        session_id: str,
+    ) -> None:
+        """Realtime WebSocket Audio Streaming Gateway Endpoint with session_id."""
+        await _handle_gateway_ws(websocket=websocket, session_id=session_id)
+
+    @application.websocket("/ws/telephony/stream")
+    async def websocket_stream_direct_endpoint(
+        websocket: WebSocket,
+    ) -> None:
+        """Realtime WebSocket Audio Streaming Gateway Endpoint for direct carrier streams."""
+        await _handle_gateway_ws(websocket=websocket, session_id=None)
+
+    @application.websocket("/ws/telephony/exotel")
+    async def websocket_exotel_direct_endpoint(
+        websocket: WebSocket,
+    ) -> None:
+        """Realtime WebSocket Audio Streaming Gateway Endpoint for direct Exotel Voicebot."""
+        await _handle_gateway_ws(websocket=websocket, session_id=None)
 
     return application
 

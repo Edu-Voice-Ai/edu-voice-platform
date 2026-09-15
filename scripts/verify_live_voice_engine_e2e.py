@@ -34,7 +34,7 @@ async def main() -> bool:
     print("=" * 60)
 
     ws_url = "wss://voice-test.gentechs.in/ws/voice"
-    call_id = f"call_outbound_verify_{uuid.uuid4().hex[:8]}"
+    call_id = f"call_inbound_verify_{uuid.uuid4().hex[:8]}"
     session_id = f"sess_{uuid.uuid4().hex[:12]}"
 
     metadata = {
@@ -42,13 +42,11 @@ async def main() -> bool:
         "call_id": call_id,
         "organization_id": "org_gentechs_test",
         "agent_id": "agent_admissions_01",
-        "call_direction": "outbound",
-        "campaign_id": "camp_admissions_2026",
-        "contact_id": "cnt_parent_9876",
-        "template_type": "admissions_followup",
-        "business_name": "Greenwood High School",
-        "agent_name": "Priya",
-        "language": "te-IN",
+        "call_direction": "inbound",
+        "template_type": "education",
+        "business_name": "Apex University",
+        "agent_name": "Maya",
+        "language": "en-IN",
         "client_sample_rate": 16000,
     }
 
@@ -57,13 +55,11 @@ async def main() -> bool:
         call_id=call_id,
         organization_id="org_gentechs_test",
         agent_id="agent_admissions_01",
-        call_direction="outbound",
-        campaign_id="camp_admissions_2026",
-        contact_id="cnt_parent_9876",
-        template_type="admissions_followup",
-        business_name="Greenwood High School",
-        agent_name="Priya",
-        language="te-IN",
+        call_direction="inbound",
+        template_type="education",
+        business_name="Apex University",
+        agent_name="Maya",
+        language="en-IN",
         client_sample_rate=16000,
     )
 

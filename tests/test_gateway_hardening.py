@@ -175,7 +175,7 @@ def test_readiness_endpoint(client: TestClient) -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ready"
-    assert data["service"] == "edu-voice-ai-backend"
+    assert data["service"] == "edu-voice-ai-gateway"
     assert "active_sessions" in data
 
 

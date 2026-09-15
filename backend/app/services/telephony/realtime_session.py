@@ -30,6 +30,16 @@ class ConnectionState(str, Enum):
     CLOSED = "closed"
 
 
+class HandoffState(str, Enum):
+    """Human handoff lifecycle states."""
+
+    IDLE = "idle"
+    REQUESTED = "requested"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class SessionStats:
     """Diagnostic counters for audio packet throughput and quality."""
 
@@ -52,7 +62,7 @@ class RealtimeVoiceSession:
         organization_id: str | None = None,
         agent_id: str | None = None,
         agent_config: Any | None = None,
-        max_queue_size: int = 100,
+        max_queue_size: int = 500,
         backpressure_strategy: str = "drop_oldest",
         provider: str = "generic",
         stream_sid: str | None = None,
@@ -115,9 +125,66 @@ class RealtimeVoiceSession:
         self.response_latencies: dict[str, Any] | None = None
         self.voice_engine_client: Any | None = None
 
+        # Human handoff state machine & tracking
+        self.handoff_state: HandoffState = HandoffState.IDLE
+        self.handoff_id: str | None = None
+        self.staff_member_id: str | None = None
+        self.staff_name: str | None = None
+        self.requested_role: str | None = None
+        self.requested_department: str | None = None
+        self.handoff_announcement: str | None = None
+        self.handoff_provider_sid: str | None = None
+        self.handoff_target_number: str | None = None
+        self.handoff_reason: str | None = None
+        self.handoff_completed_at: datetime | None = None
+        self.handoff_error: str | None = None
+        self.transfer_number: str | None = None
+
+        # Carrier media format negotiated with telecom provider (e.g. Exotel start event)
+        # Exotel bidirectional Voicebot expects signed 16-bit linear PCM at 8000 Hz (audio/x-l16)
+        self.carrier_encoding: str = "audio/x-l16" if provider == "exotel" else "audio/x-mulaw"
+        self.carrier_sample_rate: int = 8000
+
+    def update_carrier_media_format(
+        self,
+        encoding: str | None = None,
+        sample_rate: int | None = None,
+    ) -> None:
+        """Update negotiated carrier media format from provider start event."""
+        if encoding and encoding.strip():
+            self.carrier_encoding = encoding.strip()
+        if sample_rate and sample_rate > 0:
+            self.carrier_sample_rate = sample_rate
+
+    @property
+    def is_active(self) -> bool:
+        """Whether the session is currently connected and active."""
+        return (
+            self.connection_state == ConnectionState.CONNECTED
+            and self.lifecycle_state not in (
+                CallSessionState.DISCONNECTING,
+                CallSessionState.DISCONNECTED,
+                CallSessionState.FAILED,
+            )
+        )
+
     def touch_activity(self) -> None:
         """Update last recorded activity timestamp."""
         self.last_activity_at = datetime.now(timezone.utc)
+
+    def can_initiate_handoff(self) -> tuple[bool, str | None]:
+        """Check if handoff can be initiated, preventing duplicates and invalid states."""
+        if (
+            self.connection_state == ConnectionState.CLOSED
+            or self.lifecycle_state == CallSessionState.DISCONNECTED
+            or self.cancellation_event.is_set()
+        ):
+            return False, "Call session is already closed or disconnected"
+        if self.handoff_state == HandoffState.COMPLETED:
+            return False, "Human handoff has already been completed for this session"
+        if self.handoff_state == HandoffState.IN_PROGRESS:
+            return False, "Human handoff is already in progress for this session"
+        return True, None
 
     def is_expired(
         self,
@@ -238,7 +305,9 @@ class RealtimeVoiceSession:
 
     def set_stream_sid(self, stream_sid: str) -> None:
         """Associate carrier stream identifier with active session."""
-        self.stream_sid = stream_sid
+        cleaned = stream_sid.strip() if stream_sid else ""
+        if cleaned and cleaned.lower() != "none":
+            self.stream_sid = cleaned
 
     def cancel_generation(self, generation_id: str) -> int:
         """Record cancelled generation and purge corresponding audio frames."""

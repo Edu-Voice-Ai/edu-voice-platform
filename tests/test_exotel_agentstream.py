@@ -59,7 +59,7 @@ def test_dynamic_resolver_valid_call_sid(client: TestClient) -> None:
 
 
 def test_dynamic_resolver_missing_call_sid(client: TestClient) -> None:
-    """Verify dynamic resolver rejects requests missing CallSid with HTTP 400."""
+    """Verify dynamic resolver succeeds when CallSid is missing by returning dynamic WSS URL."""
     response = client.get(
         "/api/v1/telephony/exotel/resolve",
         params={
@@ -67,8 +67,10 @@ def test_dynamic_resolver_missing_call_sid(client: TestClient) -> None:
             "CallTo": "+912249360001",
         },
     )
-    assert response.status_code == 400
-    assert "CallSid" in response.json()["detail"]
+    assert response.status_code == 200
+    data = response.json()
+    assert "url" in data
+    assert data["url"].startswith("wss://gateway.gentechs.in/ws/telephony/stream/exotel_")
 
 
 def test_dynamic_resolver_unique_session_ids(client: TestClient) -> None:

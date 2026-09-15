@@ -5,6 +5,7 @@ connecting the Voice Gateway to Aravind's internal FastAPI DID resolution servic
 """
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -169,6 +170,29 @@ class BackendPhoneAssignmentResolver(PhoneAssignmentResolver):
     - Timing-safe, sanitized error mapping without SQL / secret leakage
     """
 
+    _shared_client: httpx.AsyncClient | None = None
+
+    @classmethod
+    def get_shared_client(cls, timeout_seconds: float) -> httpx.AsyncClient:
+        """Get or initialize the shared persistent HTTP client with connection pooling."""
+        if cls._shared_client is None or cls._shared_client.is_closed:
+            cls._shared_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout_seconds),
+                limits=httpx.Limits(
+                    max_keepalive_connections=20,
+                    max_connections=50,
+                    keepalive_expiry=60.0,
+                ),
+            )
+        return cls._shared_client
+
+    @classmethod
+    async def close_shared_client(cls) -> None:
+        """Gracefully close the shared HTTP client."""
+        if cls._shared_client is not None and not cls._shared_client.is_closed:
+            await cls._shared_client.aclose()
+            cls._shared_client = None
+
     def __init__(
         self,
         backend_url: str | None = None,
@@ -193,10 +217,10 @@ class BackendPhoneAssignmentResolver(PhoneAssignmentResolver):
         )
         self._external_client = client
 
-    def _get_client(self) -> httpx.AsyncClient:
+    def _get_client(self) -> tuple[httpx.AsyncClient, bool]:
         if self._external_client is not None:
-            return self._external_client
-        return httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds))
+            return self._external_client, False
+        return self.get_shared_client(self.timeout_seconds), False
 
     async def resolve_phone_assignment(
         self,
@@ -208,21 +232,30 @@ class BackendPhoneAssignmentResolver(PhoneAssignmentResolver):
             "Content-Type": "application/json",
             "X-Internal-Service-Key": self.internal_service_key,
         }
-        # Dual-compatible payload sending both phone_number and did fields
+        # Canonical backend resolve-did contract payload
         payload = {
             "phone_number": request.phone_number,
-            "did": request.phone_number,
-            "caller_number": request.caller_number,
-            "provider": request.provider or "telephony",
-            "call_sid": request.call_sid,
         }
 
-        should_close_client = self._external_client is None
-        client = self._get_client()
+        client, should_close = self._get_client()
+        http_req_start_ns = time.perf_counter_ns()
 
         try:
             response = await client.post(endpoint, json=payload, headers=headers)
-            return self._parse_response(response, request.phone_number)
+            http_res_received_ns = time.perf_counter_ns()
+            result = self._parse_response(response, request.phone_number)
+            response_parsed_ns = time.perf_counter_ns()
+
+            if result.metadata is None:
+                result.metadata = {}
+            result.metadata["timing"] = {
+                "http_req_start_ns": http_req_start_ns,
+                "http_res_received_ns": http_res_received_ns,
+                "response_parsed_ns": response_parsed_ns,
+                "http_roundtrip_ms": round((http_res_received_ns - http_req_start_ns) / 1_000_000, 2),
+                "parse_duration_ms": round((response_parsed_ns - http_res_received_ns) / 1_000_000, 2),
+            }
+            return result
         except httpx.TimeoutException as exc:
             logger.error(
                 "Backend DID resolution timed out for phone %s", request.phone_number
@@ -238,7 +271,7 @@ class BackendPhoneAssignmentResolver(PhoneAssignmentResolver):
                 message="FastAPI backend service is unavailable for DID resolution",
             ) from exc
         finally:
-            if should_close_client:
+            if should_close:
                 await client.aclose()
 
     def _parse_response(

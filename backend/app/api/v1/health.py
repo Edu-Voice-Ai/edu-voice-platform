@@ -1,10 +1,15 @@
 """Health and readiness check endpoints."""
 
 from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from backend.app.services.telephony.config import (
+    TelephonySettings,
+    get_telephony_settings,
+)
 from backend.app.services.telephony.metrics import get_gateway_metrics
 from backend.app.services.telephony.schemas import HealthResponse
 from backend.app.services.telephony.session_manager import get_realtime_session_manager
@@ -16,7 +21,7 @@ class ReadinessResponse(BaseModel):
     """Application readiness response."""
 
     status: str = Field(default="ready")
-    service: str = Field(default="edu-voice-ai-backend")
+    service: str = Field(default="edu-voice-ai-gateway")
     active_sessions: int = Field(default=0)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -27,14 +32,13 @@ class ReadinessResponse(BaseModel):
     status_code=status.HTTP_200_OK,
     summary="Application Process Liveness Check",
 )
-async def health_check() -> HealthResponse:
+async def health_check(
+    settings: Annotated[TelephonySettings, Depends(get_telephony_settings)],
+) -> HealthResponse:
     """Return process liveness without external infrastructure dependencies."""
-    from backend.app.services.telephony.config import get_telephony_settings
-
-    settings = get_telephony_settings()
     return HealthResponse(
         status="ok",
-        service="edu-voice-ai-backend",
+        service="edu-voice-ai-gateway",
         environment=settings.environment,
     )
 
@@ -44,6 +48,12 @@ async def health_check() -> HealthResponse:
     response_model=ReadinessResponse,
     status_code=status.HTTP_200_OK,
     summary="Application Process Readiness Check",
+)
+@router.get(
+    "/health/ready",
+    response_model=ReadinessResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
 )
 async def readiness_check() -> ReadinessResponse:
     """Return readiness status verifying Gateway initialized and accepting traffic."""
@@ -57,7 +67,7 @@ async def readiness_check() -> ReadinessResponse:
     active_count = await manager.active_session_count()
     return ReadinessResponse(
         status="ready",
-        service="edu-voice-ai-backend",
+        service="edu-voice-ai-gateway",
         active_sessions=active_count,
     )
 

@@ -68,6 +68,10 @@
         {
           "name": "TELEPHONY_SIGNATURE_VERIFICATION_ENABLED",
           "value": "true"
+        },
+        {
+          "name": "TELEPHONY_VOICE_ENGINE_WS_URL",
+          "value": "wss://voice-test.gentechs.in/ws/voice"
         }
       ],
       "secrets": [

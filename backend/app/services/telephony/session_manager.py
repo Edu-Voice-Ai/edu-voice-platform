@@ -35,6 +35,7 @@ class RealtimeSessionManager:
         self._metrics = get_gateway_metrics()
         self._cleanup_task: asyncio.Task[None] | None = None
         self._is_shutting_down: bool = False
+        self._handoff_records: dict[str, dict[str, Any]] = {}
 
     def is_ready(self) -> bool:
         """Check if manager is operational and has available session capacity."""
@@ -239,6 +240,55 @@ class RealtimeSessionManager:
             logger.info("Pruned %s stale/expired sessions", len(to_prune))
         return len(to_prune)
 
+    def record_handoff(
+        self,
+        call_sid: str,
+        target_number: str,
+        session_id: str | None = None,
+        organization_id: str | None = None,
+        agent_id: str | None = None,
+        reason: str | None = None,
+        handoff_id: str | None = None,
+        staff_member_id: str | None = None,
+        staff_name: str | None = None,
+    ) -> None:
+        """Cache handoff outcome for immediate Exotel Call Flow Passthru/Connect query."""
+        import time
+
+        clean_sid = call_sid.strip()
+        self._handoff_records[clean_sid] = {
+            "call_sid": clean_sid,
+            "target_number": target_number,
+            "destination_phone_number": target_number,
+            "session_id": session_id,
+            "organization_id": organization_id,
+            "agent_id": agent_id,
+            "reason": reason,
+            "handoff_id": handoff_id,
+            "staff_member_id": staff_member_id,
+            "staff_name": staff_name,
+            "created_at": time.time(),
+        }
+
+    def get_handoff_record(self, call_sid: str) -> dict[str, Any] | None:
+        """Retrieve cached handoff record for Exotel CallSid."""
+        import time
+
+        clean_sid = call_sid.strip()
+        rec = self._handoff_records.get(clean_sid)
+        if rec and (time.time() - float(rec.get("created_at", 0)) < 600):
+            return rec
+        return None
+
+    async def get_session_by_call_sid(self, call_sid: str) -> RealtimeVoiceSession | None:
+        """Find active session by telecom carrier CallSid."""
+        clean_sid = call_sid.strip()
+        async with self._lock:
+            for session in self._sessions.values():
+                if session.call_sid == clean_sid or session.call_id == clean_sid:
+                    return session
+            return None
+
     def start_cleanup_loop(self) -> None:
         """Start background task for periodic session expiration sweeping."""
         self._is_shutting_down = False
@@ -289,11 +339,9 @@ class RealtimeSessionManager:
 _global_session_manager: RealtimeSessionManager | None = None
 
 
-def get_realtime_session_manager(
-    settings: TelephonySettings | None = None,
-) -> RealtimeSessionManager:
+def get_realtime_session_manager() -> RealtimeSessionManager:
     """Dependency provider / accessor for global RealtimeSessionManager."""
     global _global_session_manager
     if _global_session_manager is None:
-        _global_session_manager = RealtimeSessionManager(settings=settings)
+        _global_session_manager = RealtimeSessionManager()
     return _global_session_manager

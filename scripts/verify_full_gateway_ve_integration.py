@@ -35,17 +35,13 @@ async def run_full_integration_test():
     call_id = f"call_int_{uuid.uuid4().hex[:8]}"
     organization_id = "org_gentechs_ai"
     agent_id = "agent_admissions_01"
-    campaign_id = "camp_admissions_2026"
-    contact_id = "cnt_lead_888"
 
     start_payload = SessionStartPayload(
         session_id=session_id,
         call_id=call_id,
         organization_id=organization_id,
         agent_id=agent_id,
-        call_direction="outbound",
-        campaign_id=campaign_id,
-        contact_id=contact_id,
+        call_direction="inbound",
         language="en-IN",
         client_sample_rate=16000,
         template_type="education",

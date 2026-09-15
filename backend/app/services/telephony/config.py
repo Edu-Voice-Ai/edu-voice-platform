@@ -44,6 +44,15 @@ class TelephonySettings(BaseSettings):
         ),
         description="Timeout in milliseconds for internal DID resolution requests",
     )
+    backend_handoff_timeout_ms: int = Field(
+        default=2000,
+        ge=100,
+        le=10000,
+        validation_alias=AliasChoices(
+            "TELEPHONY_BACKEND_HANDOFF_TIMEOUT_MS", "BACKEND_HANDOFF_TIMEOUT_MS"
+        ),
+        description="Timeout in milliseconds for internal handoff resolution requests (2-second SLA)",
+    )
 
     # Webhook Verification Configuration
     webhook_secret: SecretStr = Field(
@@ -61,7 +70,7 @@ class TelephonySettings(BaseSettings):
 
     # Realtime Voice Gateway Settings (Phase 2 & 3)
     max_audio_queue_size: int = Field(
-        default=100,
+        default=500,
         ge=10,
         le=1000,
         description="Bounded queue capacity for audio frames to prevent unbounded memory growth",
@@ -121,11 +130,11 @@ class TelephonySettings(BaseSettings):
 
     # Voice Engine Transport Configuration (Contract v1.0)
     voice_engine_ws_url: str = Field(
-        default="ws://localhost:8000/ws/voice",
+        default="wss://voice-test.gentechs.in/ws/voice",
         validation_alias=AliasChoices(
             "TELEPHONY_VOICE_ENGINE_WS_URL", "VOICE_ENGINE_WS_URL"
         ),
-        description="WebSocket URL for downstream Voice Engine (e.g. ws://localhost:8000/ws/voice or wss://voice-test.gentechs.in/ws/voice)",
+        description="WebSocket URL for downstream Voice Engine (e.g. wss://voice-test.gentechs.in/ws/voice)",
     )
     voice_engine_sample_rate: int = Field(
         default=16000,
@@ -213,6 +222,22 @@ class TelephonySettings(BaseSettings):
             "GATEWAY_PUBLIC_WS_SCHEME", "TELEPHONY_GATEWAY_PUBLIC_WS_SCHEME"
         ),
         description="Public WebSocket scheme (wss or ws)",
+    )
+
+    # Human Handoff Configuration (Fallback Defaults)
+    human_handoff_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "TELEPHONY_HUMAN_HANDOFF_ENABLED", "HUMAN_HANDOFF_ENABLED"
+        ),
+        description="Fallback toggle for human handoff when not defined by backend agent config",
+    )
+    human_handoff_number: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TELEPHONY_HUMAN_HANDOFF_NUMBER", "HUMAN_HANDOFF_NUMBER"
+        ),
+        description="Fallback authorized destination phone number in E.164 format",
     )
 
     @property
