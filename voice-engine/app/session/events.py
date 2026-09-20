@@ -35,6 +35,10 @@ class EventType(str, Enum):
     # Intelligence & Escalation
     LEAD_EXTRACTED = "lead.extracted"
     HUMAN_HANDOFF = "human_handoff"
+    HANDOFF_REQUESTED = "handoff.requested"
+    HANDOFF_ACKNOWLEDGED = "handoff.acknowledged"
+    HANDOFF_FALLBACK = "handoff.fallback"
+    HANDOFF_CANCELLED = "handoff.cancelled"
     CALL_SUMMARY = "call.summary"
     
     # Errors

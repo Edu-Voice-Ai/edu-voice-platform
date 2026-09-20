@@ -7,8 +7,9 @@ import numpy as np
 from app.audio.frames import AudioFrame
 from app.audio.codec import AudioCodec
 from app.audio.buffering import AudioChunker
-from app.session.state import SessionState, TurnStateEnum, GreetingStateEnum
+from app.session.state import SessionState, TurnStateEnum, GreetingStateEnum, HandoffStateEnum
 from app.session.events import SessionEvent, EventType
+from app.conversation.handoff_detector import MultilingualHandoffDetector
 from app.pipeline.queues import PipelineQueueBundle
 from app.pipeline.turn_manager import TurnManager
 from app.pipeline.cancellation import CancellationToken
@@ -513,6 +514,11 @@ class SpeechToSpeechEngine:
                 break
 
             frame_count += 1
+            if getattr(self.session, "is_expired", False):
+                logger.info(f"[SESSION_TIMEOUT] Session {self.session.session_id} exceeded max duration limit ({self.session.max_call_duration_seconds}s)")
+                self.session.is_active = False
+                break
+
             pre_speech_ring_buffer.append(frame.data)
             now_ms = time.time() * 1000
             playing = bool(
@@ -897,7 +903,147 @@ class SpeechToSpeechEngine:
             ))
 
             # ── ARCHITECTURAL FLOW: STT -> ConversationManager -> FastQueryRouter -> TTS/LLM ──
-            # Step 1: Check language selection or dynamic mid-call switch
+            # Step 1: Multilingual Human Handoff Intent & Cancellation Detection
+            active_lang = self.session.preferred_language or self.session.language or "en-IN"
+
+            # Check if session is currently awaiting transfer
+            if self.session.handoff_state == HandoffStateEnum.AWAITING_TRANSFER:
+                if MultilingualHandoffDetector.detect_cancellation(transcript_text):
+                    logger.info(f"[HANDOFF] Caller cancelled ongoing transfer on turn {turn_id}", extra={"session_id": self.session.session_id})
+                    self.session.record_handoff_cancelled()
+                    self.session.handoff_state = HandoffStateEnum.IDLE
+                    cancel_ev = SessionEvent(
+                        event=EventType.HANDOFF_CANCELLED,
+                        session_id=self.session.session_id,
+                        turn_id=turn_id,
+                        generation_id=generation_id,
+                        data={
+                            "call_id": self.session.call_id,
+                            "reason": "caller_cancelled"
+                        }
+                    )
+                    self._emit_event(cancel_ev)
+                    cancel_ack = {
+                        "te-IN": "సరేనండి, ట్రాన్స్‌ఫర్ రద్దు చేయబడింది. నేను మీకు ఎలా సహాయపడగలను?",
+                        "hi-IN": "ठीक है, ट्रांसफर रद्द कर दिया गया है। मैं आपकी और क्या मदद कर सकती हूँ?",
+                        "en-IN": "Sure, I have cancelled the transfer. How else can I help you today?"
+                    }.get(active_lang, "Sure, I have cancelled the transfer. How else can I help you today?")
+                    
+                    turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == turn_id) else self.session.current_turn
+                    if turn:
+                        turn.generated_text = cancel_ack
+                        turn.state = TurnStateEnum.PROCESSING
+                    self.session.last_response_text = cancel_ack
+                    self.session.append_message(role="assistant", content=cancel_ack)
+                    self._emit_event(SessionEvent(
+                        event=EventType.RESPONSE_TEXT_DELTA,
+                        session_id=self.session.session_id,
+                        turn_id=turn_id,
+                        generation_id=generation_id,
+                        data={"delta": cancel_ack}
+                    ))
+                    await self.queues.tts_in_queue.put({"delta": cancel_ack, "turn_id": turn_id, "generation_id": generation_id, "token": token})
+                    await self.queues.tts_in_queue.put({"delta": "__EOF__", "turn_id": turn_id, "generation_id": generation_id, "token": token})
+                    return
+                else:
+                    logger.info(f"[HANDOFF] Audio ignored during AWAITING_TRANSFER on turn {turn_id}", extra={"session_id": self.session.session_id})
+                    if self.session.current_turn:
+                        self.session.current_turn.state = TurnStateEnum.IDLE
+                    return
+
+            # Check if caller requested handoff or AI escalation is triggered
+            if self.session.can_trigger_handoff():
+                handoff_det = MultilingualHandoffDetector.detect(
+                    text=transcript_text,
+                    lang=active_lang,
+                    out_of_scope_turns=getattr(self.session, "out_of_scope_turn_count", 0)
+                )
+
+                if handoff_det.is_handoff_requested and handoff_det.confidence >= 0.85:
+                    logger.info(
+                        f"[HANDOFF_TRIGGERED] session={self.session.session_id} role={handoff_det.requested_role} "
+                        f"dept={handoff_det.requested_department} reason='{handoff_det.reason}' conf={handoff_det.confidence:.2f}",
+                        extra={"session_id": self.session.session_id, "turn_id": turn_id}
+                    )
+                    self._cancel_active_llm_task("Handoff triggered")
+                    self.session.record_handoff_requested(
+                        role=handoff_det.requested_role,
+                        department=handoff_det.requested_department,
+                        reason=handoff_det.reason,
+                        confidence=handoff_det.confidence
+                    )
+
+                    import datetime
+                    iso_now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    # Emit canonical handoff.requested event
+                    handoff_ev = SessionEvent(
+                        event=EventType.HANDOFF_REQUESTED,
+                        session_id=self.session.session_id,
+                        turn_id=turn_id,
+                        generation_id=generation_id,
+                        data={
+                            "call_id": self.session.call_id,
+                            "organization_id": self.session.organization_id,
+                            "agent_id": self.session.agent_id,
+                            "requested_role": handoff_det.requested_role,
+                            "requested_department": handoff_det.requested_department,
+                            "reason": handoff_det.reason,
+                            "confidence": handoff_det.confidence,
+                            "timestamp": iso_now
+                        }
+                    )
+                    self._emit_event(handoff_ev)
+
+                    # Synthesize holding announcement
+                    hold_text = MultilingualHandoffDetector.get_holding_announcement(handoff_det.requested_role, lang=active_lang)
+                    turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == turn_id) else self.session.current_turn
+                    if turn:
+                        turn.generated_text = hold_text
+                        turn.state = TurnStateEnum.PROCESSING
+                    self.session.last_response_text = hold_text
+                    self.session.append_message(role="assistant", content=hold_text)
+
+                    # Transition state to AWAITING_TRANSFER
+                    self.session.record_handoff_acknowledged(hold_media=True)
+
+                    self._emit_event(SessionEvent(
+                        event=EventType.RESPONSE_TEXT_DELTA,
+                        session_id=self.session.session_id,
+                        turn_id=turn_id,
+                        generation_id=generation_id,
+                        data={"delta": hold_text}
+                    ))
+
+                    now_ts = time.time() * 1000
+                    if self._current_metrics and self._current_metrics.turn_id == turn_id:
+                        self._current_metrics.llm_first_token_time_ms = now_ts
+                        self._current_metrics.llm_end_time_ms = now_ts
+
+                    await self.queues.tts_in_queue.put({"delta": hold_text, "turn_id": turn_id, "generation_id": generation_id, "token": token})
+                    await self.queues.tts_in_queue.put({"delta": "__EOF__", "turn_id": turn_id, "generation_id": generation_id, "token": token})
+                    return
+
+                elif handoff_det.is_ambiguous and handoff_det.clarification_prompt:
+                    logger.info(f"[HANDOFF_AMBIGUOUS] Asking clarification: '{handoff_det.clarification_prompt}'", extra={"session_id": self.session.session_id, "turn_id": turn_id})
+                    self._cancel_active_llm_task("Handoff clarification turn")
+                    turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == turn_id) else self.session.current_turn
+                    if turn:
+                        turn.generated_text = handoff_det.clarification_prompt
+                        turn.state = TurnStateEnum.PROCESSING
+                    self.session.last_response_text = handoff_det.clarification_prompt
+                    self.session.append_message(role="assistant", content=handoff_det.clarification_prompt)
+                    self._emit_event(SessionEvent(
+                        event=EventType.RESPONSE_TEXT_DELTA,
+                        session_id=self.session.session_id,
+                        turn_id=turn_id,
+                        generation_id=generation_id,
+                        data={"delta": handoff_det.clarification_prompt}
+                    ))
+                    await self.queues.tts_in_queue.put({"delta": handoff_det.clarification_prompt, "turn_id": turn_id, "generation_id": generation_id, "token": token})
+                    await self.queues.tts_in_queue.put({"delta": "__EOF__", "turn_id": turn_id, "generation_id": generation_id, "token": token})
+                    return
+
+            # Step 1.5: Check language selection or dynamic mid-call switch
             direct_ack = self.conversation_manager.handle_language_selection_or_switch(
                 self.session,
                 transcript_text,
@@ -1720,4 +1866,57 @@ class SpeechToSpeechEngine:
                 self.session.playback_estimated_end_time_ms = 0.0
                 self.session.conversation_state = "LISTENING"
                 self.session.user_has_floor = True
+
+    async def handle_handoff_acknowledged(self, status: str = "resolving_target", hold_media: bool = True):
+        """Called when Gateway emits handoff.acknowledged."""
+        logger.info(f"[HANDOFF_ACKNOWLEDGED] Session {self.session.session_id} status={status}, hold_media={hold_media}", extra={"session_id": self.session.session_id})
+        self.session.record_handoff_acknowledged(hold_media=hold_media)
+        self._cancel_active_llm_task("Handoff acknowledged by gateway")
+
+    async def handle_handoff_fallback(self, reason: str = "NO_ELIGIBLE_STAFF", prompt_instruction: Optional[str] = None):
+        """
+        Called when Gateway emits handoff.fallback.
+        Exits transfer-waiting state, restores normal LLM/VAD turn-taking, speaks polite fallback response, and resumes conversation.
+        """
+        logger.info(f"[HANDOFF_FALLBACK] Session {self.session.session_id} reason={reason}, prompt_instruction={prompt_instruction}", extra={"session_id": self.session.session_id})
+        self.session.record_handoff_fallback()
+
+        active_lang = self.session.preferred_language or self.session.language or "en-IN"
+        fallback_text = prompt_instruction or MultilingualHandoffDetector.get_fallback_announcement(reason=reason, lang=active_lang)
+
+        turn = self.session.start_new_turn(reason=f"Handoff fallback recovery: {reason}")
+        turn.generated_text = fallback_text
+        turn.state = TurnStateEnum.PROCESSING
+        self.session.last_response_text = fallback_text
+        self.session.append_message(role="assistant", content=fallback_text)
+
+        self._emit_event(SessionEvent(
+            event=EventType.RESPONSE_START,
+            session_id=self.session.session_id,
+            turn_id=turn.turn_id,
+            generation_id=turn.generation_id
+        ))
+        self._emit_event(SessionEvent(
+            event=EventType.RESPONSE_TEXT_DELTA,
+            session_id=self.session.session_id,
+            turn_id=turn.turn_id,
+            generation_id=turn.generation_id,
+            data={"delta": fallback_text}
+        ))
+
+        await self.queues.tts_in_queue.put({
+            "delta": fallback_text,
+            "turn_id": turn.turn_id,
+            "generation_id": turn.generation_id,
+            "token": turn.cancellation_token
+        })
+        await self.queues.tts_in_queue.put({
+            "delta": "__EOF__",
+            "turn_id": turn.turn_id,
+            "generation_id": turn.generation_id,
+            "token": turn.cancellation_token
+        })
+        self.session.handoff_state = HandoffStateEnum.IDLE
+        self.session.conversation_state = "LISTENING"
+
 

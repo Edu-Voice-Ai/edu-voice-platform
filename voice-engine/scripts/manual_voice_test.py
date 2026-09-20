@@ -204,9 +204,6 @@ async def run_manual_voice_client(args):
     url = args.url
     template_type = args.template
     language = args.language
-    direction = args.direction
-    campaign_id = args.campaign_id
-    contact_id = args.contact_id
     org_id = args.org_id
     agent_id = args.agent_id
     max_duration = args.duration
@@ -228,9 +225,6 @@ async def run_manual_voice_client(args):
     print(f"  WebSocket URL:      {url}")
     print(f"  Session ID:         {session_id}")
     print(f"  Call ID:            {call_id}")
-    print(f"  Call Direction:     {direction}")
-    print(f"  Campaign ID:        {campaign_id}")
-    print(f"  Contact ID:         {contact_id}")
     print(f"  Organization ID:    {org_id}")
     print(f"  Agent ID:           {agent_id}")
     print(f"  Template:           {template_type}")
@@ -308,16 +302,13 @@ async def run_manual_voice_client(args):
         async with websockets.connect(url, max_size=10_000_000, ping_interval=20, ping_timeout=20) as ws:
             print("CONNECTED")
 
-            # 1. Send session.start (Outbound Contract 5 conforming)
+            # 1. Send session.start (generic Voice Engine contract)
             start_payload = {
                 "event": "session.start",
                 "session_id": session_id,
                 "call_id": call_id,
                 "organization_id": org_id,
                 "agent_id": agent_id,
-                "call_direction": direction,
-                "campaign_id": campaign_id,
-                "contact_id": contact_id,
                 "language": language,
                 "client_sample_rate": 16000,
                 "template_type": template_type
@@ -446,9 +437,6 @@ async def run_manual_voice_client(args):
                                 "call_id": msg.get("call_id") or call_id,
                                 "organization_id": msg.get("organization_id") or org_id,
                                 "agent_id": msg.get("agent_id") or agent_id,
-                                "call_direction": msg.get("call_direction") or direction,
-                                "campaign_id": msg.get("campaign_id") or campaign_id,
-                                "contact_id": msg.get("contact_id") or contact_id,
                                 "lead": msg.get("lead") or msg.get("data")
                             }
                             print(json.dumps(lead_payload, indent=2))
@@ -463,9 +451,6 @@ async def run_manual_voice_client(args):
                                 "call_id": msg.get("call_id") or call_id,
                                 "organization_id": msg.get("organization_id") or org_id,
                                 "agent_id": msg.get("agent_id") or agent_id,
-                                "call_direction": msg.get("call_direction") or direction,
-                                "campaign_id": msg.get("campaign_id") or campaign_id,
-                                "contact_id": msg.get("contact_id") or contact_id,
                                 "summary": msg.get("summary") or msg.get("data")
                             }
                             print(json.dumps(summary_payload, indent=2))
@@ -557,25 +542,6 @@ def main():
         type=str,
         default="en-IN",
         help="Interaction language code (default: en-IN, also supports te-IN, hi-IN, etc.)"
-    )
-    parser.add_argument(
-        "--direction",
-        type=str,
-        default="outbound",
-        choices=["outbound", "inbound"],
-        help="Call direction (default: outbound)"
-    )
-    parser.add_argument(
-        "--campaign-id",
-        type=str,
-        default="manual-test-campaign",
-        help="Outbound campaign ID attribution"
-    )
-    parser.add_argument(
-        "--contact-id",
-        type=str,
-        default="manual-test-contact",
-        help="Outbound contact ID attribution"
     )
     parser.add_argument(
         "--org-id",

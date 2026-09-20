@@ -107,6 +107,10 @@ secrets/
 credentials/
 **/credentials/
 *.tar.gz
+*.tar
+*.zip
+scratch/
+**/scratch/
 
 # 8. IDE & Operating System
 .idea/
