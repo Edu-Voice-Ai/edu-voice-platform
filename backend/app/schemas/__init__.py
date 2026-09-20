@@ -1,0 +1,143 @@
+"""
+Edu-Voice-Ai - Pydantic Schemas Export Package
+"""
+
+from app.schemas.common import (
+    BaseSchema,
+    ErrorDetail,
+    ErrorResponse,
+    SuccessResponse,
+    PaginatedResponse,
+)
+from app.schemas.auth import (
+    UserProfileResponse,
+    UserOrgMembership,
+    CurrentUserResponse,
+)
+from app.schemas.organization import (
+    OrganizationBase,
+    OrganizationCreate,
+    OrganizationUpdate,
+    OrganizationResponse,
+    OrganizationMemberResponse,
+    MemberInviteRequest,
+    MemberRoleUpdate,
+)
+from app.schemas.agent import (
+    AgentConfigBase,
+    AgentConfigResponse,
+    AgentConfigUpdate,
+    AgentCreate,
+    AgentResponse,
+    AgentDetailResponse,
+)
+from app.schemas.health import (
+    HealthResponse,
+    ReadinessResponse,
+)
+from app.schemas.telephony import (
+    DIDResolveRequest,
+    DIDResolveResponse,
+    SpeechConfig,
+    HandoffConfig,
+    OperatingHours,
+    PhoneNumberCreate,
+    PhoneNumberUpdate,
+    PhoneNumberResponse,
+    PhoneAssignmentCreate,
+    PhoneAssignmentUpdate,
+    PhoneAssignmentResponse,
+)
+from app.schemas.call import (
+    CallCreate,
+    CallUpdate,
+    CallResponse,
+    CallDetailResponse,
+    CallTranscriptCreate,
+    CallTranscriptResponse,
+    CallSummaryCreate,
+    CallSummaryResponse,
+)
+from app.schemas.lead import (
+    LeadCreate,
+    LeadUpdate,
+    LeadResponse,
+    LeadDetailResponse,
+    FollowUpCreate,
+    FollowUpUpdate,
+    FollowUpResponse,
+)
+from app.schemas.knowledge import (
+    KnowledgeDocumentCreate,
+    KnowledgeDocumentUpdate,
+    KnowledgeDocumentResponse,
+    KnowledgeChunkResponse,
+    KnowledgeSearchRequest,
+    KnowledgeSearchResult,
+)
+from app.schemas.usage import (
+    UsageRecordResponse,
+    UsageSummaryResponse,
+    AuditLogResponse,
+)
+
+__all__ = [
+    "BaseSchema",
+    "ErrorDetail",
+    "ErrorResponse",
+    "SuccessResponse",
+    "PaginatedResponse",
+    "UserProfileResponse",
+    "UserOrgMembership",
+    "CurrentUserResponse",
+    "OrganizationBase",
+    "OrganizationCreate",
+    "OrganizationUpdate",
+    "OrganizationResponse",
+    "OrganizationMemberResponse",
+    "MemberInviteRequest",
+    "MemberRoleUpdate",
+    "AgentConfigBase",
+    "AgentConfigResponse",
+    "AgentConfigUpdate",
+    "AgentCreate",
+    "AgentResponse",
+    "AgentDetailResponse",
+    "HealthResponse",
+    "ReadinessResponse",
+    "DIDResolveRequest",
+    "DIDResolveResponse",
+    "SpeechConfig",
+    "HandoffConfig",
+    "OperatingHours",
+    "PhoneNumberCreate",
+    "PhoneNumberUpdate",
+    "PhoneNumberResponse",
+    "PhoneAssignmentCreate",
+    "PhoneAssignmentUpdate",
+    "PhoneAssignmentResponse",
+    "CallCreate",
+    "CallUpdate",
+    "CallResponse",
+    "CallDetailResponse",
+    "CallTranscriptCreate",
+    "CallTranscriptResponse",
+    "CallSummaryCreate",
+    "CallSummaryResponse",
+    "LeadCreate",
+    "LeadUpdate",
+    "LeadResponse",
+    "LeadDetailResponse",
+    "FollowUpCreate",
+    "FollowUpUpdate",
+    "FollowUpResponse",
+    "KnowledgeDocumentCreate",
+    "KnowledgeDocumentUpdate",
+    "KnowledgeDocumentResponse",
+    "KnowledgeChunkResponse",
+    "KnowledgeSearchRequest",
+    "KnowledgeSearchResult",
+    "UsageRecordResponse",
+    "UsageSummaryResponse",
+    "AuditLogResponse",
+]
