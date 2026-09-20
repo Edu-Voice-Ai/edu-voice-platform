@@ -64,6 +64,9 @@ def test_phone_resolver() -> InMemoryPhoneAssignmentResolver:
         "+914045901132",
         "04045901132",
         "040-459-01132",
+        "+914049170018",
+        "04049170018",
+        "040-491-70018",
     ):
         resolver.register_assignment(
             PhoneAssignmentResult(
