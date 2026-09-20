@@ -86,4 +86,7 @@ secrets/
 credentials/
 **/credentials/
 *.tar.gz
-
+*.tar
+*.zip
+scratch/
+**/scratch/
