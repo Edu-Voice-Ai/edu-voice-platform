@@ -122,3 +122,6 @@ scratch/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Audio test recordings
+*.wav
