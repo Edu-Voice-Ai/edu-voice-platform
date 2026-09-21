@@ -1,39 +1,82 @@
-"""
-Edu-Voice-Ai — Health & Readiness Endpoints
-"""
+"""Health and readiness check endpoints."""
 
-from fastapi import APIRouter, status
-from app.core.config import settings
-from app.db.session import check_database_health
-from app.services.voice_engine import voice_engine_client
-from app.schemas.health import HealthResponse, ReadinessResponse
+from datetime import datetime, timezone
+from typing import Annotated
 
-router = APIRouter(prefix="/health", tags=["Health"])
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+
+from backend.app.services.telephony.config import (
+    TelephonySettings,
+    get_telephony_settings,
+)
+from backend.app.services.telephony.metrics import get_gateway_metrics
+from backend.app.services.telephony.schemas import HealthResponse
+from backend.app.services.telephony.session_manager import get_realtime_session_manager
+
+router = APIRouter(tags=["Health"])
 
 
-@router.get("", response_model=HealthResponse, status_code=status.HTTP_200_OK)
-async def get_health() -> HealthResponse:
-    """Basic liveness probe to verify FastAPI application is running."""
+class ReadinessResponse(BaseModel):
+    """Application readiness response."""
+
+    status: str = Field(default="ready")
+    service: str = Field(default="edu-voice-ai-gateway")
+    active_sessions: int = Field(default=0)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Application Process Liveness Check",
+)
+async def health_check(
+    settings: Annotated[TelephonySettings, Depends(get_telephony_settings)],
+) -> HealthResponse:
+    """Return process liveness without external infrastructure dependencies."""
     return HealthResponse(
         status="ok",
-        service="edu-voice-backend",
-        version="1.0.0",
-        environment=settings.ENVIRONMENT,
+        service="edu-voice-ai-gateway",
+        environment=settings.environment,
     )
 
 
-@router.get("/ready", response_model=ReadinessResponse, status_code=status.HTTP_200_OK)
-async def get_readiness() -> ReadinessResponse:
-    """Readiness probe to verify database and critical dependencies."""
-    db_healthy = await check_database_health()
-    voice_health = await voice_engine_client.check_health()
+@router.get(
+    "/ready",
+    response_model=ReadinessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Application Process Readiness Check",
+)
+@router.get(
+    "/health/ready",
+    response_model=ReadinessResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+async def readiness_check() -> ReadinessResponse:
+    """Return readiness status verifying Gateway initialized and accepting traffic."""
+    manager = get_realtime_session_manager()
+    if not manager.is_ready():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gateway is not ready to accept connections",
+        )
 
-    is_ready = db_healthy
+    active_count = await manager.active_session_count()
     return ReadinessResponse(
-        status="ready" if is_ready else "degraded",
-        database=db_healthy,
-        details={
-            "database": "connected" if db_healthy else "disconnected",
-            "voice_engine": voice_health.get("status", "unknown"),
-        },
+        status="ready",
+        service="edu-voice-ai-gateway",
+        active_sessions=active_count,
     )
+
+
+@router.get(
+    "/metrics",
+    summary="Internal Telephony Gateway Metrics Snapshot",
+)
+async def metrics_snapshot() -> dict:
+    """Return current snapshot of internal gateway telemetry counters."""
+    metrics = get_gateway_metrics()
+    return metrics.get_snapshot()

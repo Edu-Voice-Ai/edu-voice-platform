@@ -1,0 +1,25 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: edu-voice-ai-gateway:prod
+    container_name: edu-voice-ai-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8002:8000"
+    env_file:
+      - .env
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  default:
+    name: yasin-gateway_default
+    external: true

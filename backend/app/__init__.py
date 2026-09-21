@@ -1,3 +1,1 @@
-"""
-Edu-Voice-Ai Backend Package
-"""
+"""Edu-Voice-AI Backend Application Package."""
