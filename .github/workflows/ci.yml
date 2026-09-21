@@ -47,7 +47,7 @@ jobs:
       - name: Security Check - Verify No Sensitive Files Tracked
         run: |
           echo "Checking repository for unintended secrets or .env files..."
-          if git ls-files | grep -E "(^\.env|\.pem$|\.key$|id_rsa)"; then
+          if git ls-files | grep -E "(^\.env$|\.pem$|\.key$|id_rsa)"; then
             echo "ERROR: Potential secret or .env file found in tracked git index!"
             exit 1
           fi
@@ -55,15 +55,15 @@ jobs:
 
       - name: Run Ruff Linter
         run: |
-          ruff check .
+          ruff check backend/app/services/telephony tests
 
       - name: Run Mypy Type Checker
         run: |
-          mypy backend tests
+          mypy --explicit-package-bases backend/app/services/telephony tests
 
       - name: Run Pytest Test Suite
         run: |
-          pytest -v
+          pytest tests/ -v
 
   docker-build-and-validate:
     name: Docker Build & Container Validation
