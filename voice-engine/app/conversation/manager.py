@@ -43,6 +43,9 @@ class ConversationManager:
         Returns:
             Optional direct acknowledgment response text if language was set/switched/clarified.
         """
+        if not user_text or not user_text.strip():
+            return None
+
         # 1. Check for explicit mid-call language switch first
         if session.language_selection_complete:
             switch_lang = LanguagePreferenceParser.detect_language_switch(user_text)
@@ -68,12 +71,41 @@ class ConversationManager:
         if not session.language_selection_complete:
             selected_lang = LanguagePreferenceParser.parse_language_preference(user_text)
             
-            # If no explicit language keyword was mentioned, check ASR detected language or LanguageDetector
+            # If no explicit language keyword was mentioned:
             if selected_lang is None:
                 if detected_language in ("te-IN", "hi-IN", "en-IN"):
                     selected_lang = detected_language
                 else:
                     selected_lang = LanguageDetector.detect_language(user_text) or "en-IN"
+
+                clean_text = user_text.strip().lower()
+                is_greeting = clean_text in ("hello", "hi", "hey", "namaste", "namaskaram", "namaskaram andi")
+
+                session.preferred_language = selected_lang
+                session.language = selected_lang
+                session.language_selection_complete = True
+                session.waiting_for_consent = False
+                session.consent_granted = True
+                session.conversation_state = "LISTENING"
+                logger.info(
+                    f"Language preference selected: {selected_lang}, proceeding to normal conversation",
+                    extra={"session_id": session.session_id}
+                )
+
+                if is_greeting:
+                    logger.info(
+                        f"[LANG_SELECT_ACK] First-turn greeting '{user_text}' detected; acknowledging in {selected_lang}.",
+                        extra={"session_id": session.session_id}
+                    )
+                    return LANGUAGE_SELECTION_ACKNOWLEDGMENT.get(selected_lang, LANGUAGE_SELECTION_ACKNOWLEDGMENT["en-IN"])
+
+                # No explicit language keyword and not a simple greeting -> set language silently, route directly to LLM/FastQueryRouter
+                logger.info(
+                    f"[LANG_SELECT_SILENT] No explicit language keyword in first turn ('{user_text}'); "
+                    f"setting language={selected_lang} silently (no acknowledgment).",
+                    extra={"session_id": session.session_id}
+                )
+                return None
 
             session.preferred_language = selected_lang
             session.language = selected_lang
@@ -83,16 +115,37 @@ class ConversationManager:
             session.conversation_state = "LISTENING"
             logger.info(f"Language preference selected: {selected_lang}, proceeding to normal conversation", extra={"session_id": session.session_id})
 
-            # Check if user directly asked an inquiry or domain question along with language selection
+            # Gate 1: Check if user directly asked an inquiry or domain question along with language selection
             is_specific_inquiry = self._check_is_domain_inquiry(session, user_text)
-
             if is_specific_inquiry:
                 # User asked a direct domain question right away -> Let FastQueryRouter / LLM answer immediately!
+                logger.info(
+                    f"[LANG_SELECT_SILENT] First-turn domain inquiry detected; "
+                    f"setting language={selected_lang} silently, routing to LLM without acknowledgment.",
+                    extra={"session_id": session.session_id}
+                )
                 return None
 
-            # If user only specified the language (e.g. "English", "Telugu", "Hindi"):
-            # Acknowledge in the chosen language and prompt for their question!
-            from app.conversation.language import LANGUAGE_SELECTION_ACKNOWLEDGMENT
+            # Gate 2: word-count guard.
+            # Only return an acknowledgment for SHORT utterances (<=3 words) that are genuine
+            # language-selection-only responses (e.g. "English", "Telugu please", "Hindi mein").
+            # A 4+ word first-turn utterance is almost certainly a domain query -- do NOT speak over it.
+            word_count = len(user_text.strip().split())
+            if word_count > 3:
+                logger.info(
+                    f"[LANG_SELECT_SILENT] First-turn utterance is {word_count} words; "
+                    f"setting language={selected_lang} silently (no acknowledgment).",
+                    extra={"session_id": session.session_id}
+                )
+                return None
+
+            # Short response (<=3 words) with no domain keywords: genuine language-selection utterance.
+            # Acknowledge in the chosen language and invite the caller's question.
+            logger.info(
+                f"[LANG_SELECT_ACK] Short language-selection utterance ({word_count} words); "
+                f"acknowledging in {selected_lang}.",
+                extra={"session_id": session.session_id}
+            )
             return LANGUAGE_SELECTION_ACKNOWLEDGMENT.get(selected_lang, LANGUAGE_SELECTION_ACKNOWLEDGMENT["en-IN"])
 
         return None

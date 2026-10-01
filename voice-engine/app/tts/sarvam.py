@@ -16,9 +16,8 @@ from app.core.logging import get_logger
 logger = get_logger("tts.sarvam")
 
 # ── Voice Consistency Lock ─────────────────────────────────────────────────
-# "pooja" is the authoritative warm female counselor voice in Bulbul:v3
-# supported across en-IN, te-IN, hi-IN.  This constant OVERRIDES any caller-
-# supplied speaker kwarg to prevent accidental voice switching between turns.
+# "pooja" is the authoritative warm counselor voice in Bulbul:v3
+# supported across en-IN, te-IN, hi-IN.
 LOCKED_SPEAKER: str = "pooja"
 
 
@@ -30,6 +29,7 @@ class SarvamTTSProvider(TTSProvider):
         api_key: Optional[str] = None,
         model: str = "bulbul:v3",
         default_speaker: str = "pooja",
+        voice_id: Optional[str] = None,
         base_url: str = "https://api.sarvam.ai",
         min_chars: int = 35,
         max_chars: int = 200
@@ -37,6 +37,7 @@ class SarvamTTSProvider(TTSProvider):
         self.api_key = api_key
         self.model = model
         self.default_speaker = default_speaker
+        self.voice_id = voice_id
         self.base_url = base_url.rstrip("/")
         self.min_chars = min_chars
         self.max_chars = max_chars
@@ -67,7 +68,15 @@ class SarvamTTSProvider(TTSProvider):
             await client.request("HEAD", f"{self.base_url}/", timeout=3.0)
             # 2. Warm TTS generation endpoint with single character to cut first-turn latency
             try:
-                await self.synthesize_text(".", language_code="en-IN")
+                if self.voice_id:
+                    await client.post(
+                        f"{self.base_url}/voices/clone",
+                        headers={"api-subscription-key": self.api_key},
+                        data={"voice_id": self.voice_id, "text": "Hi", "language_code": "en-IN", "enable_qc": "false"},
+                        timeout=5.0
+                    )
+                else:
+                    await self.synthesize_text("Hi", language_code="en-IN")
             except Exception:
                 pass
             logger.info("[TTS] Persistent HTTP/2 connection and model endpoint pre-warmed")
@@ -101,47 +110,80 @@ class SarvamTTSProvider(TTSProvider):
             "api-subscription-key": self.api_key,
             "Content-Type": "application/json"
         }
-        # Always enforce locked speaker — ignore any caller-supplied override
-        _speaker = LOCKED_SPEAKER
-        payload = {
-            "inputs": [clean_text],
-            "target_language_code": language_code,
-            "speaker": _speaker,
-            "model": self.model,
-            "enable_preprocessing": True
-        }
+        _speaker = speaker or self.default_speaker or LOCKED_SPEAKER
+
+        if self.voice_id:
+            endpoint = f"{self.base_url}/voices/clone"
+            headers = {
+                "api-subscription-key": self.api_key
+            }
+            form_data = {
+                "voice_id": self.voice_id,
+                "text": clean_text,
+                "language_code": language_code,
+                "enable_qc": "false"
+            }
+            payload = None
+            cache_id = self.voice_id
+            log_id = f"voice_id={self.voice_id}"
+            is_clone = True
+        else:
+            endpoint = f"{self.base_url}/text-to-speech"
+            headers = {
+                "api-subscription-key": self.api_key,
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "inputs": [clean_text],
+                "target_language_code": language_code,
+                "speaker": _speaker,
+                "model": self.model,
+                "enable_preprocessing": True
+            }
+            form_data = None
+            cache_id = _speaker
+            log_id = f"speaker={_speaker}"
+            is_clone = False
 
         # Deduplication cache lookup
         from app.tts.cache import TTSCacheManager
-        cached_pcm = TTSCacheManager.get(clean_text, language_code, _speaker)
+        cached_pcm = TTSCacheManager.get(clean_text, language_code, cache_id)
         if cached_pcm is not None:
-            logger.info(f"[TTS_CACHE] hit=True speaker={_speaker} language={language_code} chars={len(clean_text)}")
+            logger.info(f"[TTS_CACHE] hit=True {log_id} language={language_code} chars={len(clean_text)}")
             return cached_pcm
-        logger.info(f"[TTS_CACHE] hit=False speaker={_speaker} language={language_code} chars={len(clean_text)}")
+        logger.info(f"[TTS_CACHE] hit=False {log_id} language={language_code} chars={len(clean_text)}")
 
         logger.info(
-            f"[TTS_REQUEST] model={self.model} speaker={_speaker} language={language_code} "
+            f"[TTS_REQUEST] endpoint={'/voices/clone' if is_clone else '/text-to-speech'} "
+            f"model={self.model} {log_id} language={language_code} "
             f"char_count={len(clean_text)}"
         )
 
         try:
             client = self._get_client()
             t0 = time.time()
-            resp = await client.post(f"{self.base_url}/text-to-speech", headers=headers, json=payload)
+            if is_clone:
+                resp = await client.post(endpoint, headers=headers, data=form_data)
+            else:
+                resp = await client.post(endpoint, headers=headers, json=payload)
             ttfb_ms = (time.time() - t0) * 1000
-            
+
             if resp.status_code != 200:
-                logger.error(f"Sarvam TTS failed ({resp.status_code}): {resp.text}")
+                logger.error(f"Sarvam TTS failed ({resp.status_code}) on {endpoint}: {resp.text}")
                 duration_ms = max(int(len(clean_text) * 65), 1200)
                 silence_frame = AudioFrame.silence(duration_ms=duration_ms, sample_rate=16000)
                 return silence_frame.data
 
             data = resp.json()
-            audios = data.get("audios", [])
-            if not audios:
+            if is_clone:
+                wav_b64 = data.get("audio_b64")
+            else:
+                audios = data.get("audios", [])
+                wav_b64 = audios[0] if audios else None
+
+            if not wav_b64:
                 return b""
 
-            wav_b64 = audios[0]
             wav_bytes = base64.b64decode(wav_b64)
             pcm_data, sr, _, _ = AudioCodec.wav_bytes_to_pcm(wav_bytes)
             resampled = AudioCodec.resample_linear(pcm_data, sr, 16000)
@@ -151,7 +193,7 @@ class SarvamTTSProvider(TTSProvider):
                 extra={"ttfb_ms": ttfb_ms, "chars": len(clean_text)}
             )
             # Store in deduplication cache
-            TTSCacheManager.put(clean_text, language_code, clean_audio, _speaker)
+            TTSCacheManager.put(clean_text, language_code, clean_audio, cache_id)
             return clean_audio
         except httpx.RequestError as e:
             raise TTSError(f"Sarvam TTS network error: {e}", provider="sarvam")
@@ -197,8 +239,8 @@ class SarvamTTSProvider(TTSProvider):
         """
         chunker = AudioChunker(sample_rate=16000, frame_duration_ms=20)
         delimiters = {".", "!", "?", "।", "\n"}
-        # Always enforce locked speaker — caller-supplied speaker arg is ignored
-        active_speaker = LOCKED_SPEAKER
+        # Enforce configured speaker / voice ID
+        active_speaker = self.voice_id or self.default_speaker or LOCKED_SPEAKER
 
         # Bounded async queue for pending text chunks to synthesize
         segment_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=10)
@@ -245,25 +287,29 @@ class SarvamTTSProvider(TTSProvider):
         async def synthesizer():
             synth_idx = 0
             tasks: list[asyncio.Task] = []
+            sem = asyncio.Semaphore(2)  # Bounded concurrency: maximum 2 concurrent Sarvam synthesis tasks
             
             async def synth_worker(idx: int, segment_text: str) -> Optional[bytes]:
                 if cancellation_token and cancellation_token.is_cancelled:
                     return None
-                try:
-                    logger.info(f"[TTS_DEBUG] TEXT_CHUNK_{idx}: \"{segment_text}\" (chars={len(segment_text)})")
-                    t_start = time.time() * 1000
-                    pcm = await self.synthesize_text(segment_text, language_code=language_code, speaker=active_speaker)
-                    t_elapsed = (time.time() * 1000) - t_start
+                async with sem:
                     if cancellation_token and cancellation_token.is_cancelled:
                         return None
-                    logger.info(f"[TTS] chunk_id={idx} chars={len(segment_text)} synth_ms={t_elapsed:.1f}")
-                    return pcm
-                except Exception as e:
-                    logger.error(f"TTS synthesis error for segment '{segment_text[:30]}...': {e}")
-                    return None
+                    try:
+                        logger.info(f"[TTS_DEBUG] TEXT_CHUNK_{idx}: \"{segment_text}\" (chars={len(segment_text)})")
+                        t_start = time.time() * 1000
+                        pcm = await self.synthesize_text(segment_text, language_code=language_code, speaker=active_speaker)
+                        t_elapsed = (time.time() * 1000) - t_start
+                        if cancellation_token and cancellation_token.is_cancelled:
+                            return None
+                        logger.info(f"[TTS] chunk_id={idx} chars={len(segment_text)} synth_ms={t_elapsed:.1f}")
+                        return pcm
+                    except Exception as e:
+                        logger.error(f"TTS synthesis error for segment '{segment_text[:30]}...': {e}")
+                        return None
 
             try:
-                # Launch workers concurrently as segments arrive
+                # Launch workers concurrently as segments arrive.
                 async def feeder():
                     nonlocal synth_idx
                     while True:
@@ -277,25 +323,23 @@ class SarvamTTSProvider(TTSProvider):
                         tasks.append(t)
 
                 feeder_task = asyncio.create_task(feeder())
-                
-                # Consume completed tasks in-order as soon as available
+
+                # Phase 1: drain tasks in submission order while feeder is still running.
+                # We must NOT exit when feeder_task.done() because the feeder may have just
+                # appended the last task(s) and exited — we still need to await them.
+                # Strategy: wait for feeder to finish first, then drain any remaining tasks.
+                await feeder_task  # blocks until all segments have been dispatched as tasks
+
+                # Phase 2: now drain every task that was submitted, in submission order.
                 task_idx = 0
-                while True:
+                while task_idx < len(tasks):
                     if cancellation_token and cancellation_token.is_cancelled:
                         break
-                    if task_idx < len(tasks):
-                        curr_t = tasks[task_idx]
-                        task_idx += 1
-                        pcm_res = await curr_t
-                        if pcm_res and not (cancellation_token and cancellation_token.is_cancelled):
-                            await audio_buffer_queue.put(pcm_res)
-                    elif feeder_task.done():
-                        # All segments processed
-                        break
-                    else:
-                        await asyncio.sleep(0.010)
+                    pcm_res = await tasks[task_idx]
+                    task_idx += 1
+                    if pcm_res and not (cancellation_token and cancellation_token.is_cancelled):
+                        await audio_buffer_queue.put(pcm_res)
 
-                await feeder_task
             finally:
                 for t in tasks:
                     if not t.done():

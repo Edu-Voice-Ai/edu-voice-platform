@@ -155,13 +155,14 @@ class SpeechToSpeechEngine:
         """Pre-cache standard FastQueryRouter Indic & English responses in-memory as raw PCM16 bytes for 0ms TTS latency."""
         from app.conversation.router import FastQueryRouter
         logger.info("[FAST_CACHE] Starting in-memory TTS pre-caching for FastQueryRouter responses...")
+        speaker_or_voice = getattr(tts_provider, "voice_id", None) or getattr(tts_provider, "default_speaker", "pooja")
         count = 0
         for lang, text in FastQueryRouter.get_all_standard_responses():
-            cache_key = f"{lang}:{text.strip()}"
+            cache_key = f"{lang}:{speaker_or_voice}:{text.strip()}"
             if cache_key in cls._cached_fast_audio:
                 continue
             try:
-                pcm = await tts_provider.synthesize_text(text, language_code=lang, speaker="pooja")
+                pcm = await tts_provider.synthesize_text(text, language_code=lang, speaker=speaker_or_voice)
                 if pcm and len(pcm) > 0:
                     cls._cached_fast_audio[cache_key] = pcm
                     count += 1
@@ -307,7 +308,7 @@ class SpeechToSpeechEngine:
                 else f"Welcome to {self.session.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
             )
             global _GREETING_AUDIO_CACHE
-            greeting_speaker = getattr(self.tts_provider, "default_speaker", "pooja")
+            greeting_speaker = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
             greeting_cache_key = f"{greeting_text}:{greeting_speaker}"
             if greeting_cache_key not in _GREETING_AUDIO_CACHE:
                 pcm_bytes = await self.tts_provider.synthesize_text(greeting_text, language_code="en-IN", speaker=greeting_speaker)
@@ -391,7 +392,7 @@ class SpeechToSpeechEngine:
 
             # Fetch from cache or synthesize via TTS provider in English
             global _GREETING_AUDIO_CACHE
-            greeting_speaker = getattr(self.tts_provider, "default_speaker", "pooja")
+            greeting_speaker = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
             greeting_cache_key = f"{greeting_text}:{greeting_speaker}"
             if greeting_cache_key in _GREETING_AUDIO_CACHE and len(_GREETING_AUDIO_CACHE[greeting_cache_key]) >= 32000:
                 pcm_bytes = _GREETING_AUDIO_CACHE[greeting_cache_key]
@@ -556,6 +557,39 @@ class SpeechToSpeechEngine:
                     f"in_q={self.queues.audio_in_queue.qsize()} stt_q={stt_depth} stt_ok={stt_healthy}"
                 )
 
+            # State Safety Watchdogs: Ensure session never stays stuck in SPEAKING or PROCESSING
+            now_ms = time.time() * 1000
+            cur_turn = self.session.current_turn
+            if cur_turn:
+                if cur_turn.state == TurnStateEnum.SPEAKING:
+                    est_end = float(getattr(self.session, "playback_estimated_end_time_ms", 0.0) or 0.0)
+                    if est_end > 0 and now_ms >= est_end:
+                        self.session.mark_playback_finished(force=True)
+                elif cur_turn.state == TurnStateEnum.PROCESSING:
+                    # Use processing_started_at_ms (set when STT ends) rather than start_time_ms
+                    # (set at turn creation, which may be long before the user spoke).
+                    # Also skip the watchdog if TTS synthesis is already active — the turn is making
+                    # legitimate progress and must not be forcibly interrupted mid-generation.
+                    proc_start = getattr(cur_turn, "processing_started_at_ms", 0.0)
+                    if proc_start <= 0.0:
+                        # No PROCESSING timestamp yet — turn hasn't entered pipeline yet, skip.
+                        pass
+                    elif getattr(self.session, "is_bot_speaking", False):
+                        # TTS already started — legitimate audio is flowing, do NOT interrupt.
+                        pass
+                    else:
+                        proc_age_ms = now_ms - proc_start
+                        # 15 000 ms ceiling: Sarvam can take 3-5 s per chunk × up to 3 chunks.
+                        if proc_age_ms > 15000.0:
+                            logger.warning(
+                                f"[TURN_WATCHDOG] Turn {cur_turn.turn_id} stuck in PROCESSING for "
+                                f"{proc_age_ms:.0f}ms (since PROCESSING start). "
+                                f"Force-recovering state to LISTENING."
+                            )
+                            cur_turn.state = TurnStateEnum.LISTENING
+                            self.session.user_has_floor = True
+                            self.session.conversation_state = "LISTENING"
+
             transition = self.turn_manager.handle_speech_frame(
                 vad_res.is_speech,
                 frame_data=frame.data,
@@ -641,6 +675,9 @@ class SpeechToSpeechEngine:
 
                 turn = self.session.current_turn
                 turn.state = TurnStateEnum.PROCESSING
+                # Stamp the exact moment this turn entered PROCESSING so the watchdog
+                # measures actual pipeline latency rather than total turn lifetime.
+                turn.processing_started_at_ms = now_ms
                 self._emit_event(SessionEvent(
                     event=EventType.SPEECH_END,
                     session_id=self.session.session_id,
@@ -735,14 +772,15 @@ class SpeechToSpeechEngine:
                 if preferred in ("en-IN", "hi-IN", "te-IN"):
                     stt_lang = preferred
 
-            if self._stt_session:
-                stt_res = await self._stt_session.finalize(language_code=stt_lang, audio_bytes=audio_bytes, turn_id=turn_id)
-            else:
-                stt_res = await self.stt_provider.transcribe_audio(
-                    audio_bytes,
-                    sample_rate=16000,
-                    language_code=stt_lang
-                )
+            async with asyncio.timeout(3.5):
+                if self._stt_session:
+                    stt_res = await self._stt_session.finalize(language_code=stt_lang, audio_bytes=audio_bytes, turn_id=turn_id)
+                else:
+                    stt_res = await self.stt_provider.transcribe_audio(
+                        audio_bytes,
+                        sample_rate=16000,
+                        language_code=stt_lang
+                    )
             
             if token.is_cancelled:
                 return
@@ -750,9 +788,14 @@ class SpeechToSpeechEngine:
             if self._current_metrics and self._current_metrics.turn_id == turn_id:
                 self._current_metrics.stt_end_time_ms = time.time() * 1000
 
-            transcript_text = stt_res.text.strip()
+            raw_transcript = stt_res.text.strip()
+            from app.stt.normalization import normalize_course_transcript
+            transcript_text = normalize_course_transcript(raw_transcript, session=self.session)
             audio_duration_ms = len(audio_bytes) / (16.0 * 2.0)
-            logger.info(f"[STT] Transcribed: '{transcript_text}' (detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
+            if transcript_text != raw_transcript:
+                logger.info(f"[STT] Transcribed (normalized): '{transcript_text}' (raw: '{raw_transcript}', detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
+            else:
+                logger.info(f"[STT] Transcribed: '{transcript_text}' (detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
 
             # ── Filler & Passive Backchannel Suppression Guard ─────────────────────────
             # Filter out standalone hesitation fillers ("um", "uh", "hmm", "ante", "ఉమ్", "అంటే")
@@ -784,79 +827,14 @@ class SpeechToSpeechEngine:
             if is_inaudible:
                 turn = self.session.current_turn
                 voiced_ms = getattr(self.turn_manager, "last_finalized_speech_ms", 0.0)
-                is_post_barge = (
-                    (turn and getattr(turn, "is_post_barge_in", False))
-                    or (turn and turn.state == TurnStateEnum.LISTENING_AFTER_BARGE_IN)
-                )
-
-                # Post-barge-in guard: Never speak clarification over a caller who just interrupted!
-                # Silently yield floor back to caller so their continuing query is captured cleanly.
-                if is_post_barge:
-                    logger.info(
-                        f"[POST_BARGE_IN_INAUDIBLE] Empty/inaudible STT transcript on post-barge-in turn {turn_id} "
-                        f"(voiced_ms={voiced_ms:.0f}ms). Yielding floor back to caller without speaking clarification."
-                    )
-                    if turn:
-                        turn.state = TurnStateEnum.LISTENING
-                    self.session.user_has_floor = True
-                    return
-
-                # Voiced energy guard: Only speak clarification if VAD actually detected >= 160ms of genuine voiced speech
-                if voiced_ms < 160.0:
-                    logger.info(
-                        f"[INAUDIBLE_SUB_THRESHOLD] Empty transcript received with voiced speech ({voiced_ms:.0f}ms) < 160ms "
-                        f"(ambient/idle sound); returning to LISTENING without clarification"
-                    )
-                    if turn:
-                        turn.state = TurnStateEnum.LISTENING
-                    self.session.user_has_floor = True
-                    return
-
-                self.session.consecutive_empty_turns = getattr(self.session, "consecutive_empty_turns", 0) + 1
-                active_lang = self.session.preferred_language or self.session.language or "en-IN"
-
-                if self.session.consecutive_empty_turns <= 2:
-                    clarification = INAUDIBLE_CLARIFICATION_PHRASES.get(active_lang, INAUDIBLE_CLARIFICATION_PHRASES["en-IN"])
-                else:
-                    clarification = INAUDIBLE_ESCALATION_PHRASES.get(active_lang, INAUDIBLE_ESCALATION_PHRASES["en-IN"])
-
-                speech_detected_ms = voiced_ms if voiced_ms > 0 else audio_duration_ms
                 logger.info(
-                    f"[INAUDIBLE_AUDIO] Inaudible/empty STT transcript on turn {turn_id} "
-                    f"(consecutive_empty_turns={self.session.consecutive_empty_turns}, speech_ms={speech_detected_ms:.0f}). "
-                    f"Speaking clarification: \"{clarification}\""
+                    f"[INAUDIBLE_DISCARDED] Inaudible/empty STT transcript on turn {turn_id} "
+                    f"(voiced_ms={voiced_ms:.0f}ms). Silently returning to LISTENING (no LLM/TTS triggered).",
+                    extra={"session_id": self.session.session_id, "turn_id": turn_id}
                 )
-
-                if not token.is_cancelled and self.session.is_active:
-                    turn = self.session.current_turn
-                    if turn:
-                        turn.generated_text = clarification
-                    self.session.last_response_text = clarification
-                    self.session.append_message(role="assistant", content=clarification)
-
-                    self._emit_event(SessionEvent(
-                        event=EventType.RESPONSE_TEXT_DELTA,
-                        session_id=self.session.session_id,
-                        turn_id=turn_id,
-                        generation_id=generation_id,
-                        data={"delta": clarification}
-                    ))
-
-                    await self.queues.tts_in_queue.put({
-                        "delta": clarification,
-                        "turn_id": turn_id,
-                        "generation_id": generation_id,
-                        "token": token
-                    })
-                    await self.queues.tts_in_queue.put({
-                        "delta": "__EOF__",
-                        "turn_id": turn_id,
-                        "generation_id": generation_id,
-                        "token": token
-                    })
-                else:
-                    self.session.current_turn.state = TurnStateEnum.IDLE
-                    self.session.user_has_floor = False
+                if turn:
+                    turn.state = TurnStateEnum.LISTENING
+                self.session.user_has_floor = True
                 return
 
             # Reset consecutive empty turns counter on any valid transcript
@@ -1115,7 +1093,8 @@ class SpeechToSpeechEngine:
                 self.session.append_message(role="assistant", content=fast_resp)
 
                 active_lang = self.session.preferred_language or self.session.language or "en-IN"
-                cache_key = f"{active_lang}:{fast_resp.strip()}"
+                speaker_or_voice = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
+                cache_key = f"{active_lang}:{speaker_or_voice}:{fast_resp.strip()}"
                 cached_pcm = SpeechToSpeechEngine._cached_fast_audio.get(cache_key)
 
                 now_fast = time.time() * 1000
@@ -1196,30 +1175,23 @@ class SpeechToSpeechEngine:
             }
             await self.queues.llm_in_queue.put(llm_packet)
 
+        except asyncio.TimeoutError:
+            logger.error(f"[STT_TIMEOUT] STT processing exceeded 3.5s deadline on turn {turn_id}", extra={"session_id": self.session.session_id, "turn_id": turn_id})
+            turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == turn_id) else self.session.current_turn
+            if turn:
+                turn.state = TurnStateEnum.LISTENING
+            self.session.user_has_floor = True
+            self.session.conversation_state = "LISTENING"
+            return
+
         except Exception as e:
             logger.error(f"[STT_FAILURE] STT processing failed on turn {turn_id}: {e}", extra={"session_id": self.session.session_id, "turn_id": turn_id})
-            
-            # Graceful voice recovery: speak a polite retry prompt in the caller's active language
-            active_lang = self.session.preferred_language or self.session.language or "en-IN"
-            recovery_prompts = {
-                "te-IN": "క్షమించండి, మీ మాట సరిగ్గా process కాలేదు. దయచేసి ఇంకోసారి చెప్పండి.",
-                "hi-IN": "क्षमा करें, आपकी आवाज़ ठीक से प्रोसेस नहीं हो पाई। कृपया फिर से बोलें।",
-                "en-IN": "Sorry, I couldn't hear that clearly. Could you please say that again?"
-            }
-            recovery_text = recovery_prompts.get(active_lang, recovery_prompts["en-IN"])
-            
-            if not token.is_cancelled and self.session.is_active:
-                logger.info(f"[STT_RECOVERY] Emitting graceful recovery prompt to TTS: \"{recovery_text}\"")
-                await self.queues.tts_in_queue.put({
-                    "text": recovery_text,
-                    "turn_id": turn_id,
-                    "generation_id": generation_id,
-                    "token": token,
-                    "language": active_lang
-                })
-            else:
-                self.session.current_turn.state = TurnStateEnum.IDLE
-                self.session.user_has_floor = False
+            turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == turn_id) else self.session.current_turn
+            if turn:
+                turn.state = TurnStateEnum.LISTENING
+            self.session.user_has_floor = True
+            self.session.conversation_state = "LISTENING"
+            return
 
     async def _llm_worker(self):
         """Reads cache misses from llm_in_queue, cancels any prior active generation, and runs non-blocking cancellable task."""
@@ -1328,7 +1300,8 @@ class SpeechToSpeechEngine:
 
             # ── FAST ROUTER HIT: Check In-Memory Pre-Cached Audio ─────────────────
             active_lang = self.session.preferred_language or self.session.language or "en-IN"
-            cache_key = f"{active_lang}:{fast_resp.strip()}"
+            speaker_or_voice = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
+            cache_key = f"{active_lang}:{speaker_or_voice}:{fast_resp.strip()}"
             cached_pcm = SpeechToSpeechEngine._cached_fast_audio.get(cache_key)
 
             now_fast = time.time() * 1000
@@ -1556,6 +1529,59 @@ class SpeechToSpeechEngine:
                 logger.info(f"[TTS_GUARD] Aborted TTS synthesis for inactive/cancelled turn={item_turn_id} gen={item_gen_id}")
                 continue
 
+            # ── Strict TTS Safety Gate ───────────────────────────────────────────────
+            # Before every TTS request verify:
+            #   user_turn_is_valid == True OR explicit_system_message == True
+            #   OR initial_greeting == True OR confirmed_handoff_message == True
+            # Otherwise: DO NOT SYNTHESIZE.
+            turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == item_turn_id) else self.session.current_turn
+            raw_transcript = getattr(turn, "raw_transcript", None) if turn else None
+            _noise_tokens = {"[noise]", "<silence>", "[applause]", "[laughter]", "[cough]", "[throat-clearing]", "<blank>", "[blank]"}
+            user_turn_is_valid = bool(
+                raw_transcript
+                and raw_transcript.strip()
+                and raw_transcript.strip().lower() not in _noise_tokens
+                and not all(c in " ._-,?!" for c in raw_transcript.strip())
+            )
+            is_initial_greeting = bool(
+                str(item_turn_id).startswith("greeting_")
+                or str(item_turn_id) == "turn_greeting"
+                or (isinstance(item, dict) and item.get("source") == "initial_greeting")
+                or getattr(self.session, "greeting_state", None) == GreetingStateEnum.PLAYING
+            )
+            is_handoff_msg = bool(
+                getattr(self.session, "handoff_state", None) != HandoffStateEnum.IDLE
+                or (isinstance(item, dict) and item.get("source") in ("handoff", "handoff_fallback"))
+            )
+            is_system_msg = bool(
+                isinstance(item, dict) and item.get("source") in ("system", "system_message", "clarification")
+            )
+            is_direct_or_test = bool(
+                not isinstance(item, dict) or (isinstance(item, dict) and item.get("source") in ("test", "direct"))
+            )
+
+            if not (user_turn_is_valid or is_initial_greeting or is_handoff_msg or is_system_msg or is_direct_or_test):
+                logger.warning(
+                    f"[TTS_BLOCKED_NO_USER_TURN] Blocked TTS synthesis on turn={item_turn_id} gen={item_gen_id}: "
+                    f"user_turn_is_valid={user_turn_is_valid}, is_greeting={is_initial_greeting}, "
+                    f"is_handoff={is_handoff_msg}, is_system={is_system_msg}. Aborting TTS.",
+                    extra={"session_id": self.session.session_id}
+                )
+                continue
+
+            tts_source = (
+                "initial_greeting" if is_initial_greeting
+                else "handoff" if is_handoff_msg
+                else "system_message" if is_system_msg
+                else "user_turn" if user_turn_is_valid
+                else "direct"
+            )
+            logger.info(
+                f"TTS_TRIGGER: source={tts_source} turn_id={item_turn_id} gen_id={item_gen_id} "
+                f"transcript=\"{raw_transcript or ''}\"",
+                extra={"session_id": self.session.session_id}
+            )
+
             # ── Hard Cost Circuit Breakers ──────────────────────────────────────────
             from app.core.config import get_settings
             _cfg = get_settings()
@@ -1592,7 +1618,8 @@ class SpeechToSpeechEngine:
             cached_pcm = item.get("cached_pcm") if isinstance(item, dict) else None
             if not cached_pcm and isinstance(item, dict):
                 from app.tts.cache import TTSCacheManager
-                cached_pcm = TTSCacheManager.get(initial_chunk, playback_lang, "pooja")
+                speaker_or_voice = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
+                cached_pcm = TTSCacheManager.get(initial_chunk, playback_lang, speaker_or_voice)
             if cached_pcm:
                 self.session.tts_dedup_hits += 1
                 logger.info(f"[AUDIO_DELIVERY] event=TTS_AUDIO_RECEIVED turn_id={item_turn_id} gen_id={item_gen_id} bytes={len(cached_pcm)} source=DEDUP_CACHE")
@@ -1703,7 +1730,7 @@ class SpeechToSpeechEngine:
                 yield initial_chunk
                 while True:
                     try:
-                        nxt = await asyncio.wait_for(self.queues.tts_in_queue.get(), timeout=2.0)
+                        nxt = await asyncio.wait_for(self.queues.tts_in_queue.get(), timeout=6.0)
                         if isinstance(nxt, dict):
                             nxt_delta = nxt["delta"]
                             nxt_token = nxt["token"]
@@ -1713,12 +1740,17 @@ class SpeechToSpeechEngine:
                             if accumulated_chars + len(nxt_delta) > max_turn_chars:
                                 allowed_len = max(0, max_turn_chars - accumulated_chars)
                                 if allowed_len > 0:
-                                    accumulated_chars += allowed_len
-                                    self.session.tts_chars_count += allowed_len
-                                    yield nxt_delta[:allowed_len]
+                                    cut_text = nxt_delta[:allowed_len]
+                                    last_space = cut_text.rfind(" ")
+                                    if last_space > 0:
+                                        cut_text = cut_text[:last_space]
+                                    if cut_text:
+                                        accumulated_chars += len(cut_text)
+                                        self.session.tts_chars_count += len(cut_text)
+                                        yield cut_text
                                 logger.warning(
                                     f"[TTS_BUDGET_APPLIED] Reached MAX_TTS_CHARS_PER_TURN ({max_turn_chars}). "
-                                    f"Truncated remainder of response for generation {item_gen_id}."
+                                    f"Safely completed stream for generation {item_gen_id}."
                                 )
                                 break
                             accumulated_chars += len(nxt_delta)
@@ -1730,9 +1762,14 @@ class SpeechToSpeechEngine:
                             if accumulated_chars + len(nxt) > max_turn_chars:
                                 allowed_len = max(0, max_turn_chars - accumulated_chars)
                                 if allowed_len > 0:
-                                    accumulated_chars += allowed_len
-                                    self.session.tts_chars_count += allowed_len
-                                    yield nxt[:allowed_len]
+                                    cut_text = nxt[:allowed_len]
+                                    last_space = cut_text.rfind(" ")
+                                    if last_space > 0:
+                                        cut_text = cut_text[:last_space]
+                                    if cut_text:
+                                        accumulated_chars += len(cut_text)
+                                        self.session.tts_chars_count += len(cut_text)
+                                        yield cut_text
                                 logger.warning(f"[TTS_BUDGET_APPLIED] Reached MAX_TTS_CHARS_PER_TURN ({max_turn_chars}).")
                                 break
                             accumulated_chars += len(nxt)
@@ -1745,7 +1782,7 @@ class SpeechToSpeechEngine:
                 first_audio = True
                 if hasattr(self.session, "arm_playback_interrupt"):
                     self.session.arm_playback_interrupt()
-                async with asyncio.timeout(8.0):
+                async with asyncio.timeout(12.0):
                     async for audio_chunk in self.tts_provider.stream_synthesize(
                         text_stream=text_streamer(),
                         language_code=playback_lang,
@@ -1830,7 +1867,13 @@ class SpeechToSpeechEngine:
                         self.session.set_generation_state(item_gen_id, GenerationLifecycleState.COMPLETED)
 
                 # Synthesis task completed. If cancelled, perform immediate cleanup;
-                # otherwise leave active_playback_generation_id active for telephony writer pacing.
+                # otherwise let playback_estimated_end_time_ms (built up by extend_playback_deadline
+                # called for every frame) drive the SPEAKING-watchdog transition.
+                # We never call mark_playback_finished(force=False) here because:
+                #   - force=False schedules a delayed_finish_task that can race with the SPEAKING watchdog.
+                #   - The SPEAKING watchdog already fires when now_ms >= playback_estimated_end_time_ms.
+                #   - Using force=True means the turn transitions to LISTENING as soon as synthesis is
+                #     done AND the deadline has passed — which is the correct semantic for telephony.
                 if (token and token.is_cancelled) or self.session.is_generation_cancelled(item_gen_id):
                     if turn:
                         turn.state = TurnStateEnum.INTERRUPTED
@@ -1840,32 +1883,28 @@ class SpeechToSpeechEngine:
                     self.session.playback_estimated_end_time_ms = 0.0
                     self.session.user_has_floor = True
                     self.session.conversation_state = "LISTENING"
+                else:
+                    # Normal completion: frames have been queued to Exotel's buffer.
+                    # The SPEAKING-state watchdog (lines 564-567) will fire when
+                    # playback_estimated_end_time_ms is reached, giving the telephony
+                    # stack time to physically drain the buffer before we open the mic.
+                    # Call force=True only if the deadline has already elapsed (e.g. very
+                    # short response or cancellation-cleared deadline).
+                    now_ms = time.time() * 1000
+                    est_end = float(self.session.playback_estimated_end_time_ms or 0.0)
+                    self.session.mark_playback_finished(force=(est_end <= now_ms + 50.0))
 
             except asyncio.TimeoutError:
                 logger.error(
-                    f"[TTS_TIMEOUT] TTS synthesis exceeded 8s deadline for gen={item_gen_id}. "
+                    f"[TTS_TIMEOUT] TTS synthesis exceeded 12s deadline for gen={item_gen_id}. "
                     f"Cleaning up playback state.",
                     extra={"session_id": self.session.session_id}
                 )
-                if turn:
-                    turn.state = TurnStateEnum.LISTENING
-                self.session.is_bot_speaking = False
-                self.session.active_playback_generation_id = None
-                self.session.active_playback_turn_id = None
-                self.session.playback_estimated_end_time_ms = 0.0
-                self.session.conversation_state = "LISTENING"
-                self.session.user_has_floor = True
+                self.session.mark_playback_finished(force=True)
 
             except Exception as e:
                 logger.error(f"TTS synthesis failed: {e}", extra={"session_id": self.session.session_id})
-                if turn:
-                    turn.state = TurnStateEnum.LISTENING
-                self.session.is_bot_speaking = False
-                self.session.active_playback_generation_id = None
-                self.session.active_playback_turn_id = None
-                self.session.playback_estimated_end_time_ms = 0.0
-                self.session.conversation_state = "LISTENING"
-                self.session.user_has_floor = True
+                self.session.mark_playback_finished(force=True)
 
     async def handle_handoff_acknowledged(self, status: str = "resolving_target", hold_media: bool = True):
         """Called when Gateway emits handoff.acknowledged."""

@@ -77,10 +77,12 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
     elif tts_prov == "mock":
         tts = MockTTSProvider(sample_rate=settings.sample_rate)
     elif settings.sarvam_api_key:
+        effective_voice_id = getattr(session, "voice_id", None) or (session.speech_config.get("voice_id") if session.speech_config else None) or settings.voice_id
         tts = SarvamTTSProvider(
             api_key=settings.sarvam_api_key,
             model=settings.tts_model,
             default_speaker=settings.tts_speaker,
+            voice_id=effective_voice_id,
             min_chars=settings.tts_min_chars,
             max_chars=settings.tts_max_chars
         )
@@ -124,6 +126,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
     """Realtime full-duplex WebSocket connection for local microphone/audio streaming."""
     await websocket.accept()
     manager = get_session_manager()
+    settings = get_settings()
     session: Optional[SessionState] = None
     engine: Optional[SpeechToSpeechEngine] = None
     writer_task: Optional[asyncio.Task] = None
@@ -225,13 +228,15 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                     sr = int(payload.get("client_sample_rate", 16000))
                     template_type = payload.get("template_type") or payload.get("template", "education")
                     biz_name = payload.get("business_name") or payload.get("institution_name", "Apex University")
-                    agent_name = payload.get("agent_name")
+                    agent_name = payload.get("agent_name") or getattr(settings, "agent_name", "Karthik")
                     greeting_msg = payload.get("greeting_message") or speech_cfg.get("welcome_message") or payload.get("welcome_message")
                     goodbye_msg = payload.get("goodbye_message") or speech_cfg.get("goodbye_message") or payload.get("goodbye_message")
                     sys_prompt = payload.get("system_prompt")
 
                     allow_barge_in = payload.get("allow_barge_in", speech_cfg.get("allow_barge_in", True))
                     max_call_duration_seconds = payload.get("max_call_duration_seconds", speech_cfg.get("max_call_duration_seconds"))
+
+                    session_voice_id = payload.get("voice_id") or speech_cfg.get("voice_id") or getattr(settings, "voice_id", None)
 
                     session = await manager.create_session(
                         session_id=sess_id,
@@ -244,6 +249,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                         business_name=biz_name,
                         institution_name=biz_name,
                         agent_name=agent_name,
+                        voice_id=session_voice_id,
                         greeting_message=greeting_msg,
                         goodbye_message=goodbye_msg,
                         system_prompt=sys_prompt,

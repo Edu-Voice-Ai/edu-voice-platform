@@ -57,6 +57,7 @@ tts:
   provider: "sarvam"
   model: "bulbul:v3"
   speaker: "pooja"
+  voice_id: "svc-bb7e2b64-fabc-44c7-ad82-f18cae02f746"
   pace: 1.0
   chunking:
     min_chars: 60
@@ -70,7 +71,7 @@ rag:
 
 admission_ai:
   institution_name: "Apex University"
-  agent_name: "Priya"
+  agent_name: "Karthik"
   default_language: "en-IN"
 
 languages:

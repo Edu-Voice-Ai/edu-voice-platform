@@ -144,11 +144,17 @@ class TurnManager:
         """
         turn = self.session.current_turn
         now_ms = time.time() * 1000
-        is_greeting = getattr(self.session, "is_greeting_playing", False)
+
+        # Auto-clear physical playback if deadline has elapsed
+        est_end = float(getattr(self.session, "playback_estimated_end_time_ms", 0.0) or 0.0)
+        if est_end > 0 and now_ms >= est_end:
+            self.session.mark_playback_finished(force=True)
+
+        is_greeting = bool(getattr(self.session, "is_greeting_playing", False))
         is_ai_speaking = (
-            getattr(self.session, "is_assistant_speaking", False)
-            or getattr(self.session, "is_bot_speaking", False)
-            or (now_ms < getattr(self.session, "playback_estimated_end_time_ms", 0.0))
+            getattr(self.session, "is_bot_speaking", False)
+            or (turn and turn.state == TurnStateEnum.SPEAKING)
+            or (est_end > 0 and now_ms < est_end)
             or (getattr(self.session, "active_playback_generation_id", None) is not None)
         )
         is_active_playback = is_greeting or is_ai_speaking
@@ -465,6 +471,23 @@ class TurnManager:
                         f"turn_id={turn.turn_id}"
                     )
                     self._silence_accumulated_ms = 0.0
+
+                # Max Speech Duration Watchdog (10.0 seconds)
+                # Prevents background hum or continuous speech from hanging endpoint detection
+                if self._total_turn_speech_ms >= 10000.0:
+                    self._last_finalized_speech_ms = self._total_turn_speech_ms
+                    logger.info(
+                        f"[TURN] Max speech duration reached ({self._total_turn_speech_ms:.0f}ms); "
+                        f"force-finalizing turn {turn.turn_id}"
+                    )
+                    self._is_in_speech = False
+                    self._speech_accumulated_ms = 0.0
+                    self._silence_accumulated_ms = 0.0
+                    self._consecutive_silence_frames = 0
+                    self._total_turn_speech_ms = 0.0
+                    turn.state = TurnStateEnum.PROCESSING
+                    self.session.user_has_floor = False
+                    return "SPEECH_ENDED"
 
             if not self._is_in_speech:
                 if self._speech_accumulated_ms >= self.min_speech_duration_ms or self.min_speech_duration_ms == 0:

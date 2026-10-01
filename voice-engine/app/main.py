@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
         try:
             from app.tts.sarvam import SarvamTTSProvider
             from app.pipeline.engine import SpeechToSpeechEngine
-            tts = SarvamTTSProvider(api_key=settings.sarvam_api_key, model=settings.tts_model, default_speaker=settings.tts_speaker)
+            tts = SarvamTTSProvider(api_key=settings.sarvam_api_key, model=settings.tts_model, default_speaker=settings.tts_speaker, voice_id=settings.voice_id)
             asyncio.create_task(SpeechToSpeechEngine.warmup_fast_query_cache(tts))
         except Exception as e:
             logger.warning(f"Failed to trigger FastRouter TTS pre-caching: {e}")

@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="sarvam", alias="LLM_PROVIDER")
     tts_provider: str = Field(default="sarvam", alias="TTS_PROVIDER")
 
-    # Model specifications
+    # Persona & Voice specifications
+    agent_name: str = Field(default="Karthik", alias="AGENT_NAME")
+    voice_id: Optional[str] = Field(default="svc-bb7e2b64-fabc-44c7-ad82-f18cae02f746", alias="VOICE_ID")
     llm_model: str = Field(default="sarvam-105b-conversations", alias="LLM_MODEL")
     stt_model: str = Field(default="saaras:v3", alias="STT_MODEL")
     tts_model: str = Field(default="bulbul:v3", alias="TTS_MODEL")
@@ -58,7 +60,7 @@ class Settings(BaseSettings):
     tts_max_chars: int = Field(default=180, alias="TTS_MAX_CHARS")
 
     # Hard TTS Cost & Safety Guardrails
-    max_tts_chars_per_turn: int = Field(default=350, alias="MAX_TTS_CHARS_PER_TURN")
+    max_tts_chars_per_turn: int = Field(default=800, alias="MAX_TTS_CHARS_PER_TURN")
     max_tts_requests_per_call: int = Field(default=30, alias="MAX_TTS_REQUESTS_PER_CALL")
     max_tts_chars_per_call: int = Field(default=5000, alias="MAX_TTS_CHARS_PER_CALL")
     enable_startup_tts_precache: bool = Field(default=False, alias="ENABLE_STARTUP_TTS_PRECACHE")
