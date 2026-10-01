@@ -155,13 +155,14 @@ class SpeechToSpeechEngine:
         """Pre-cache standard FastQueryRouter Indic & English responses in-memory as raw PCM16 bytes for 0ms TTS latency."""
         from app.conversation.router import FastQueryRouter
         logger.info("[FAST_CACHE] Starting in-memory TTS pre-caching for FastQueryRouter responses...")
+        speaker_or_voice = getattr(tts_provider, "voice_id", None) or getattr(tts_provider, "default_speaker", "pooja")
         count = 0
         for lang, text in FastQueryRouter.get_all_standard_responses():
-            cache_key = f"{lang}:{text.strip()}"
+            cache_key = f"{lang}:{speaker_or_voice}:{text.strip()}"
             if cache_key in cls._cached_fast_audio:
                 continue
             try:
-                pcm = await tts_provider.synthesize_text(text, language_code=lang, speaker="pooja")
+                pcm = await tts_provider.synthesize_text(text, language_code=lang, speaker=speaker_or_voice)
                 if pcm and len(pcm) > 0:
                     cls._cached_fast_audio[cache_key] = pcm
                     count += 1
@@ -391,7 +392,7 @@ class SpeechToSpeechEngine:
 
             # Fetch from cache or synthesize via TTS provider in English
             global _GREETING_AUDIO_CACHE
-            greeting_speaker = getattr(self.tts_provider, "default_speaker", "pooja")
+            greeting_speaker = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
             greeting_cache_key = f"{greeting_text}:{greeting_speaker}"
             if greeting_cache_key in _GREETING_AUDIO_CACHE and len(_GREETING_AUDIO_CACHE[greeting_cache_key]) >= 32000:
                 pcm_bytes = _GREETING_AUDIO_CACHE[greeting_cache_key]
@@ -1115,7 +1116,8 @@ class SpeechToSpeechEngine:
                 self.session.append_message(role="assistant", content=fast_resp)
 
                 active_lang = self.session.preferred_language or self.session.language or "en-IN"
-                cache_key = f"{active_lang}:{fast_resp.strip()}"
+                speaker_or_voice = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
+                cache_key = f"{active_lang}:{speaker_or_voice}:{fast_resp.strip()}"
                 cached_pcm = SpeechToSpeechEngine._cached_fast_audio.get(cache_key)
 
                 now_fast = time.time() * 1000
@@ -1328,7 +1330,8 @@ class SpeechToSpeechEngine:
 
             # ── FAST ROUTER HIT: Check In-Memory Pre-Cached Audio ─────────────────
             active_lang = self.session.preferred_language or self.session.language or "en-IN"
-            cache_key = f"{active_lang}:{fast_resp.strip()}"
+            speaker_or_voice = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
+            cache_key = f"{active_lang}:{speaker_or_voice}:{fast_resp.strip()}"
             cached_pcm = SpeechToSpeechEngine._cached_fast_audio.get(cache_key)
 
             now_fast = time.time() * 1000
@@ -1592,7 +1595,8 @@ class SpeechToSpeechEngine:
             cached_pcm = item.get("cached_pcm") if isinstance(item, dict) else None
             if not cached_pcm and isinstance(item, dict):
                 from app.tts.cache import TTSCacheManager
-                cached_pcm = TTSCacheManager.get(initial_chunk, playback_lang, "pooja")
+                speaker_or_voice = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
+                cached_pcm = TTSCacheManager.get(initial_chunk, playback_lang, speaker_or_voice)
             if cached_pcm:
                 self.session.tts_dedup_hits += 1
                 logger.info(f"[AUDIO_DELIVERY] event=TTS_AUDIO_RECEIVED turn_id={item_turn_id} gen_id={item_gen_id} bytes={len(cached_pcm)} source=DEDUP_CACHE")

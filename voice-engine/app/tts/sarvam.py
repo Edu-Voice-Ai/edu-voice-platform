@@ -102,20 +102,28 @@ class SarvamTTSProvider(TTSProvider):
             "api-subscription-key": self.api_key,
             "Content-Type": "application/json"
         }
-        # Enforce configured speaker / voice ID
         _speaker = speaker or self.default_speaker or LOCKED_SPEAKER
 
         if self.voice_id:
-            payload = {
-                "inputs": [clean_text],
-                "target_language_code": language_code,
-                "voice_id": self.voice_id,
-                "model": self.model,
-                "enable_preprocessing": True
+            endpoint = f"{self.base_url}/voices/clone"
+            headers = {
+                "api-subscription-key": self.api_key
             }
+            form_data = {
+                "voice_id": self.voice_id,
+                "text": clean_text,
+                "language_code": language_code
+            }
+            payload = None
             cache_id = self.voice_id
             log_id = f"voice_id={self.voice_id}"
+            is_clone = True
         else:
+            endpoint = f"{self.base_url}/text-to-speech"
+            headers = {
+                "api-subscription-key": self.api_key,
+                "Content-Type": "application/json"
+            }
             payload = {
                 "inputs": [clean_text],
                 "target_language_code": language_code,
@@ -123,8 +131,10 @@ class SarvamTTSProvider(TTSProvider):
                 "model": self.model,
                 "enable_preprocessing": True
             }
+            form_data = None
             cache_id = _speaker
             log_id = f"speaker={_speaker}"
+            is_clone = False
 
         # Deduplication cache lookup
         from app.tts.cache import TTSCacheManager
@@ -135,28 +145,36 @@ class SarvamTTSProvider(TTSProvider):
         logger.info(f"[TTS_CACHE] hit=False {log_id} language={language_code} chars={len(clean_text)}")
 
         logger.info(
-            f"[TTS_REQUEST] model={self.model} {log_id} language={language_code} "
+            f"[TTS_REQUEST] endpoint={'/voices/clone' if is_clone else '/text-to-speech'} "
+            f"model={self.model} {log_id} language={language_code} "
             f"char_count={len(clean_text)}"
         )
 
         try:
             client = self._get_client()
             t0 = time.time()
-            resp = await client.post(f"{self.base_url}/text-to-speech", headers=headers, json=payload)
+            if is_clone:
+                resp = await client.post(endpoint, headers=headers, data=form_data)
+            else:
+                resp = await client.post(endpoint, headers=headers, json=payload)
             ttfb_ms = (time.time() - t0) * 1000
-            
+
             if resp.status_code != 200:
-                logger.error(f"Sarvam TTS failed ({resp.status_code}): {resp.text}")
+                logger.error(f"Sarvam TTS failed ({resp.status_code}) on {endpoint}: {resp.text}")
                 duration_ms = max(int(len(clean_text) * 65), 1200)
                 silence_frame = AudioFrame.silence(duration_ms=duration_ms, sample_rate=16000)
                 return silence_frame.data
 
             data = resp.json()
-            audios = data.get("audios", [])
-            if not audios:
+            if is_clone:
+                wav_b64 = data.get("audio_b64")
+            else:
+                audios = data.get("audios", [])
+                wav_b64 = audios[0] if audios else None
+
+            if not wav_b64:
                 return b""
 
-            wav_b64 = audios[0]
             wav_bytes = base64.b64decode(wav_b64)
             pcm_data, sr, _, _ = AudioCodec.wav_bytes_to_pcm(wav_bytes)
             resampled = AudioCodec.resample_linear(pcm_data, sr, 16000)
