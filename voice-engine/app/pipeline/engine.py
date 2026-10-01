@@ -1707,7 +1707,7 @@ class SpeechToSpeechEngine:
                 yield initial_chunk
                 while True:
                     try:
-                        nxt = await asyncio.wait_for(self.queues.tts_in_queue.get(), timeout=2.0)
+                        nxt = await asyncio.wait_for(self.queues.tts_in_queue.get(), timeout=6.0)
                         if isinstance(nxt, dict):
                             nxt_delta = nxt["delta"]
                             nxt_token = nxt["token"]
@@ -1717,12 +1717,17 @@ class SpeechToSpeechEngine:
                             if accumulated_chars + len(nxt_delta) > max_turn_chars:
                                 allowed_len = max(0, max_turn_chars - accumulated_chars)
                                 if allowed_len > 0:
-                                    accumulated_chars += allowed_len
-                                    self.session.tts_chars_count += allowed_len
-                                    yield nxt_delta[:allowed_len]
+                                    cut_text = nxt_delta[:allowed_len]
+                                    last_space = cut_text.rfind(" ")
+                                    if last_space > 0:
+                                        cut_text = cut_text[:last_space]
+                                    if cut_text:
+                                        accumulated_chars += len(cut_text)
+                                        self.session.tts_chars_count += len(cut_text)
+                                        yield cut_text
                                 logger.warning(
                                     f"[TTS_BUDGET_APPLIED] Reached MAX_TTS_CHARS_PER_TURN ({max_turn_chars}). "
-                                    f"Truncated remainder of response for generation {item_gen_id}."
+                                    f"Safely completed stream for generation {item_gen_id}."
                                 )
                                 break
                             accumulated_chars += len(nxt_delta)
@@ -1734,9 +1739,14 @@ class SpeechToSpeechEngine:
                             if accumulated_chars + len(nxt) > max_turn_chars:
                                 allowed_len = max(0, max_turn_chars - accumulated_chars)
                                 if allowed_len > 0:
-                                    accumulated_chars += allowed_len
-                                    self.session.tts_chars_count += allowed_len
-                                    yield nxt[:allowed_len]
+                                    cut_text = nxt[:allowed_len]
+                                    last_space = cut_text.rfind(" ")
+                                    if last_space > 0:
+                                        cut_text = cut_text[:last_space]
+                                    if cut_text:
+                                        accumulated_chars += len(cut_text)
+                                        self.session.tts_chars_count += len(cut_text)
+                                        yield cut_text
                                 logger.warning(f"[TTS_BUDGET_APPLIED] Reached MAX_TTS_CHARS_PER_TURN ({max_turn_chars}).")
                                 break
                             accumulated_chars += len(nxt)
@@ -1749,7 +1759,7 @@ class SpeechToSpeechEngine:
                 first_audio = True
                 if hasattr(self.session, "arm_playback_interrupt"):
                     self.session.arm_playback_interrupt()
-                async with asyncio.timeout(8.0):
+                async with asyncio.timeout(40.0):
                     async for audio_chunk in self.tts_provider.stream_synthesize(
                         text_stream=text_streamer(),
                         language_code=playback_lang,
@@ -1847,7 +1857,7 @@ class SpeechToSpeechEngine:
 
             except asyncio.TimeoutError:
                 logger.error(
-                    f"[TTS_TIMEOUT] TTS synthesis exceeded 8s deadline for gen={item_gen_id}. "
+                    f"[TTS_TIMEOUT] TTS synthesis exceeded 40s deadline for gen={item_gen_id}. "
                     f"Cleaning up playback state.",
                     extra={"session_id": self.session.session_id}
                 )

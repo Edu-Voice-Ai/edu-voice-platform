@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     tts_max_chars: int = Field(default=180, alias="TTS_MAX_CHARS")
 
     # Hard TTS Cost & Safety Guardrails
-    max_tts_chars_per_turn: int = Field(default=350, alias="MAX_TTS_CHARS_PER_TURN")
+    max_tts_chars_per_turn: int = Field(default=800, alias="MAX_TTS_CHARS_PER_TURN")
     max_tts_requests_per_call: int = Field(default=30, alias="MAX_TTS_REQUESTS_PER_CALL")
     max_tts_chars_per_call: int = Field(default=5000, alias="MAX_TTS_CHARS_PER_CALL")
     enable_startup_tts_precache: bool = Field(default=False, alias="ENABLE_STARTUP_TTS_PRECACHE")

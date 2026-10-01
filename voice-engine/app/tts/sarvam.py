@@ -68,7 +68,15 @@ class SarvamTTSProvider(TTSProvider):
             await client.request("HEAD", f"{self.base_url}/", timeout=3.0)
             # 2. Warm TTS generation endpoint with single character to cut first-turn latency
             try:
-                await self.synthesize_text(".", language_code="en-IN")
+                if self.voice_id:
+                    await client.post(
+                        f"{self.base_url}/voices/clone",
+                        headers={"api-subscription-key": self.api_key},
+                        data={"voice_id": self.voice_id, "text": "Hi", "language_code": "en-IN", "enable_qc": "false"},
+                        timeout=5.0
+                    )
+                else:
+                    await self.synthesize_text("Hi", language_code="en-IN")
             except Exception:
                 pass
             logger.info("[TTS] Persistent HTTP/2 connection and model endpoint pre-warmed")
@@ -112,7 +120,8 @@ class SarvamTTSProvider(TTSProvider):
             form_data = {
                 "voice_id": self.voice_id,
                 "text": clean_text,
-                "language_code": language_code
+                "language_code": language_code,
+                "enable_qc": "false"
             }
             payload = None
             cache_id = self.voice_id
@@ -278,22 +287,26 @@ class SarvamTTSProvider(TTSProvider):
         async def synthesizer():
             synth_idx = 0
             tasks: list[asyncio.Task] = []
+            sem = asyncio.Semaphore(2)  # Bounded concurrency: maximum 2 concurrent Sarvam synthesis tasks
             
             async def synth_worker(idx: int, segment_text: str) -> Optional[bytes]:
                 if cancellation_token and cancellation_token.is_cancelled:
                     return None
-                try:
-                    logger.info(f"[TTS_DEBUG] TEXT_CHUNK_{idx}: \"{segment_text}\" (chars={len(segment_text)})")
-                    t_start = time.time() * 1000
-                    pcm = await self.synthesize_text(segment_text, language_code=language_code, speaker=active_speaker)
-                    t_elapsed = (time.time() * 1000) - t_start
+                async with sem:
                     if cancellation_token and cancellation_token.is_cancelled:
                         return None
-                    logger.info(f"[TTS] chunk_id={idx} chars={len(segment_text)} synth_ms={t_elapsed:.1f}")
-                    return pcm
-                except Exception as e:
-                    logger.error(f"TTS synthesis error for segment '{segment_text[:30]}...': {e}")
-                    return None
+                    try:
+                        logger.info(f"[TTS_DEBUG] TEXT_CHUNK_{idx}: \"{segment_text}\" (chars={len(segment_text)})")
+                        t_start = time.time() * 1000
+                        pcm = await self.synthesize_text(segment_text, language_code=language_code, speaker=active_speaker)
+                        t_elapsed = (time.time() * 1000) - t_start
+                        if cancellation_token and cancellation_token.is_cancelled:
+                            return None
+                        logger.info(f"[TTS] chunk_id={idx} chars={len(segment_text)} synth_ms={t_elapsed:.1f}")
+                        return pcm
+                    except Exception as e:
+                        logger.error(f"TTS synthesis error for segment '{segment_text[:30]}...': {e}")
+                        return None
 
             try:
                 # Launch workers concurrently as segments arrive
