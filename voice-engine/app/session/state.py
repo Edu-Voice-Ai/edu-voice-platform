@@ -233,21 +233,52 @@ class SessionState:
         base = max(float(self.playback_estimated_end_time_ms or 0.0), now_ms)
         self.playback_estimated_end_time_ms = base + duration_ms
 
+    async def _async_delayed_finish(self, delay_sec: float, gen_id: Optional[str]):
+        import asyncio
+        try:
+            await asyncio.sleep(delay_sec)
+            now_ms = time.time() * 1000
+            if (
+                now_ms >= float(self.playback_estimated_end_time_ms or 0.0)
+                or not self.active_playback_generation_id
+                or self.active_playback_generation_id == gen_id
+            ):
+                self.mark_playback_finished(force=True)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"Delayed finish error: {e}")
+
     def mark_playback_finished(self, force: bool = False):
         """Clear greeting/TTS playback flags when physical playout is done (or forced after telephony pacing)."""
         now_ms = time.time() * 1000
-        self.is_greeting_playing = False
-        self.active_playback_generation_id = None
-        self.active_playback_turn_id = None
-        self.active_playback_language = None
+        existing_task = getattr(self, "_delayed_finish_task", None)
         if force or now_ms >= float(self.playback_estimated_end_time_ms or 0.0):
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
+            self.is_greeting_playing = False
             self.is_bot_speaking = False
+            self.active_playback_generation_id = None
+            self.active_playback_turn_id = None
+            self.active_playback_language = None
             self.playback_estimated_end_time_ms = 0.0
             self.user_has_floor = True
             if hasattr(self, "conversation_state"):
                 self.conversation_state = "LISTENING"
-            if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.IDLE):
+            if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.IDLE, TurnStateEnum.PROCESSING):
                 self.current_turn.state = TurnStateEnum.LISTENING
+        else:
+            # Playout is still in-flight on telephony. Schedule a background timer to ensure state transitions to LISTENING on completion.
+            current_gen = self.active_playback_generation_id
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
+            remaining_sec = max(0.05, (float(self.playback_estimated_end_time_ms) - now_ms) / 1000.0)
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                self._delayed_finish_task = loop.create_task(self._async_delayed_finish(remaining_sec, current_gen))
+            except RuntimeError:
+                pass
 
     def signal_playback_interrupt(self):
         """Wake the transport writer immediately so it can interrupt playback instead of finishing a pacing sleep."""
@@ -344,6 +375,9 @@ class SessionState:
         self.is_greeting_playing = False
         self.is_bot_speaking = False
         self.user_has_floor = True
+        existing_task = getattr(self, "_delayed_finish_task", None)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
         self.signal_playback_interrupt()
 
     def is_generation_cancelled(self, gen_id: Optional[str]) -> bool:

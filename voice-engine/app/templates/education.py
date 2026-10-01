@@ -22,11 +22,11 @@ class EducationTemplate(BaseAgentTemplate):
     """Education & University Admissions Agent Template (Apex University / Priya)."""
 
     ADMISSION_KEYWORDS = {
-        "fee", "fees", "course", "courses", "cse", "csc", "ece", "hostel", "dates", "eligibility",
+        "fee", "fees", "course", "courses", "cse", "csc", "ece", "cec", "mec", "mpc", "bipc", "hostel", "dates", "eligibility",
         "admission", "admissions", "placement", "placements", "campus", "scholarship", "btech", "mtech",
         "b.tech", "m.tech", "mba", "bba", "apply", "how to apply", "offer", "offering", "programs",
         "కాలేజ్", "ఫీజు", "ఎప్పుడు", "ఎంత", "కోర్సులు", "కోర్స్", "కోర్సు", "వివరాలు", "డీటెయిల్స్",
-        "ఎలా", "ఉన్నాయి", "ఉంది", "చెప్పండి", "ఫీస్", "कब", "कितना", "कोर्स", "एडमिशन", "बताइए", "क्या"
+        "సిఈసి", "సీఈసీ", "పీఎస్సీ", "ఎలా", "ఉన్నాయి", "ఉంది", "చెప్పండి", "ఫీస్", "कब", "कितना", "कोर्स", "एडमिशन", "बताइए", "क्या", "पीएससी", "सीईसी"
     }
 
     @property

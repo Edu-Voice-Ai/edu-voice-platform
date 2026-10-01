@@ -557,6 +557,25 @@ class SpeechToSpeechEngine:
                     f"in_q={self.queues.audio_in_queue.qsize()} stt_q={stt_depth} stt_ok={stt_healthy}"
                 )
 
+            # State Safety Watchdogs: Ensure session never stays stuck in SPEAKING or PROCESSING
+            now_ms = time.time() * 1000
+            cur_turn = self.session.current_turn
+            if cur_turn:
+                if cur_turn.state == TurnStateEnum.SPEAKING:
+                    est_end = float(getattr(self.session, "playback_estimated_end_time_ms", 0.0) or 0.0)
+                    if est_end > 0 and now_ms >= est_end:
+                        self.session.mark_playback_finished(force=True)
+                elif cur_turn.state == TurnStateEnum.PROCESSING:
+                    turn_age_ms = now_ms - getattr(cur_turn, "start_time_ms", now_ms)
+                    if turn_age_ms > 7500.0:
+                        logger.warning(
+                            f"[TURN_WATCHDOG] Turn {cur_turn.turn_id} stuck in PROCESSING for {turn_age_ms:.0f}ms. "
+                            f"Force-recovering state to LISTENING."
+                        )
+                        cur_turn.state = TurnStateEnum.LISTENING
+                        self.session.user_has_floor = True
+                        self.session.conversation_state = "LISTENING"
+
             transition = self.turn_manager.handle_speech_frame(
                 vad_res.is_speech,
                 frame_data=frame.data,
@@ -736,14 +755,15 @@ class SpeechToSpeechEngine:
                 if preferred in ("en-IN", "hi-IN", "te-IN"):
                     stt_lang = preferred
 
-            if self._stt_session:
-                stt_res = await self._stt_session.finalize(language_code=stt_lang, audio_bytes=audio_bytes, turn_id=turn_id)
-            else:
-                stt_res = await self.stt_provider.transcribe_audio(
-                    audio_bytes,
-                    sample_rate=16000,
-                    language_code=stt_lang
-                )
+            async with asyncio.timeout(3.5):
+                if self._stt_session:
+                    stt_res = await self._stt_session.finalize(language_code=stt_lang, audio_bytes=audio_bytes, turn_id=turn_id)
+                else:
+                    stt_res = await self.stt_provider.transcribe_audio(
+                        audio_bytes,
+                        sample_rate=16000,
+                        language_code=stt_lang
+                    )
             
             if token.is_cancelled:
                 return
@@ -751,9 +771,14 @@ class SpeechToSpeechEngine:
             if self._current_metrics and self._current_metrics.turn_id == turn_id:
                 self._current_metrics.stt_end_time_ms = time.time() * 1000
 
-            transcript_text = stt_res.text.strip()
+            raw_transcript = stt_res.text.strip()
+            from app.stt.normalization import normalize_course_transcript
+            transcript_text = normalize_course_transcript(raw_transcript, session=self.session)
             audio_duration_ms = len(audio_bytes) / (16.0 * 2.0)
-            logger.info(f"[STT] Transcribed: '{transcript_text}' (detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
+            if transcript_text != raw_transcript:
+                logger.info(f"[STT] Transcribed (normalized): '{transcript_text}' (raw: '{raw_transcript}', detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
+            else:
+                logger.info(f"[STT] Transcribed: '{transcript_text}' (detected: {stt_res.language_code}, duration={audio_duration_ms:.0f}ms)")
 
             # ── Filler & Passive Backchannel Suppression Guard ─────────────────────────
             # Filter out standalone hesitation fillers ("um", "uh", "hmm", "ante", "ఉమ్", "అంటే")
@@ -1197,6 +1222,15 @@ class SpeechToSpeechEngine:
                 "enqueued_at_ms": enqueued_at_ms
             }
             await self.queues.llm_in_queue.put(llm_packet)
+
+        except asyncio.TimeoutError:
+            logger.error(f"[STT_TIMEOUT] STT processing exceeded 3.5s deadline on turn {turn_id}", extra={"session_id": self.session.session_id, "turn_id": turn_id})
+            turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == turn_id) else self.session.current_turn
+            if turn:
+                turn.state = TurnStateEnum.LISTENING
+            self.session.user_has_floor = True
+            self.session.conversation_state = "LISTENING"
+            return
 
         except Exception as e:
             logger.error(f"[STT_FAILURE] STT processing failed on turn {turn_id}: {e}", extra={"session_id": self.session.session_id, "turn_id": turn_id})
@@ -1759,7 +1793,7 @@ class SpeechToSpeechEngine:
                 first_audio = True
                 if hasattr(self.session, "arm_playback_interrupt"):
                     self.session.arm_playback_interrupt()
-                async with asyncio.timeout(40.0):
+                async with asyncio.timeout(12.0):
                     async for audio_chunk in self.tts_provider.stream_synthesize(
                         text_stream=text_streamer(),
                         language_code=playback_lang,
@@ -1844,7 +1878,7 @@ class SpeechToSpeechEngine:
                         self.session.set_generation_state(item_gen_id, GenerationLifecycleState.COMPLETED)
 
                 # Synthesis task completed. If cancelled, perform immediate cleanup;
-                # otherwise leave active_playback_generation_id active for telephony writer pacing.
+                # otherwise ensure playback completion transition is cleanly armed.
                 if (token and token.is_cancelled) or self.session.is_generation_cancelled(item_gen_id):
                     if turn:
                         turn.state = TurnStateEnum.INTERRUPTED
@@ -1854,32 +1888,25 @@ class SpeechToSpeechEngine:
                     self.session.playback_estimated_end_time_ms = 0.0
                     self.session.user_has_floor = True
                     self.session.conversation_state = "LISTENING"
+                else:
+                    now_ms = time.time() * 1000
+                    est_end = float(self.session.playback_estimated_end_time_ms or 0.0)
+                    if est_end <= now_ms + 50.0:
+                        self.session.mark_playback_finished(force=True)
+                    else:
+                        self.session.mark_playback_finished(force=False)
 
             except asyncio.TimeoutError:
                 logger.error(
-                    f"[TTS_TIMEOUT] TTS synthesis exceeded 40s deadline for gen={item_gen_id}. "
+                    f"[TTS_TIMEOUT] TTS synthesis exceeded 12s deadline for gen={item_gen_id}. "
                     f"Cleaning up playback state.",
                     extra={"session_id": self.session.session_id}
                 )
-                if turn:
-                    turn.state = TurnStateEnum.LISTENING
-                self.session.is_bot_speaking = False
-                self.session.active_playback_generation_id = None
-                self.session.active_playback_turn_id = None
-                self.session.playback_estimated_end_time_ms = 0.0
-                self.session.conversation_state = "LISTENING"
-                self.session.user_has_floor = True
+                self.session.mark_playback_finished(force=True)
 
             except Exception as e:
                 logger.error(f"TTS synthesis failed: {e}", extra={"session_id": self.session.session_id})
-                if turn:
-                    turn.state = TurnStateEnum.LISTENING
-                self.session.is_bot_speaking = False
-                self.session.active_playback_generation_id = None
-                self.session.active_playback_turn_id = None
-                self.session.playback_estimated_end_time_ms = 0.0
-                self.session.conversation_state = "LISTENING"
-                self.session.user_has_floor = True
+                self.session.mark_playback_finished(force=True)
 
     async def handle_handoff_acknowledged(self, status: str = "resolving_target", hold_media: bool = True):
         """Called when Gateway emits handoff.acknowledged."""
