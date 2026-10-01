@@ -1,7 +1,7 @@
 """Configuration settings for Edu-Voice Voice Engine."""
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, model_validator
 
 
 class Settings(BaseSettings):
@@ -31,11 +31,21 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="sarvam", alias="LLM_PROVIDER")
     tts_provider: str = Field(default="sarvam", alias="TTS_PROVIDER")
 
-    # Model specifications
+    # Persona & Voice specifications
+    agent_name: str = Field(default="Karthik", alias="AGENT_NAME")
+    voice_id: Optional[str] = Field(default=None, alias="VOICE_ID")
     llm_model: str = Field(default="sarvam-105b-conversations", alias="LLM_MODEL")
     stt_model: str = Field(default="saaras:v3", alias="STT_MODEL")
     tts_model: str = Field(default="bulbul:v3", alias="TTS_MODEL")
-    tts_speaker: str = Field(default="pooja", alias="TTS_SPEAKER")
+    tts_speaker: str = Field(default="karthik", alias="TTS_SPEAKER")
+
+    @model_validator(mode="after")
+    def resolve_voice_and_speaker(self):
+        if self.voice_id and (self.tts_speaker == "karthik" or not self.tts_speaker):
+            self.tts_speaker = self.voice_id
+        elif not self.voice_id and self.tts_speaker:
+            self.voice_id = self.tts_speaker
+        return self
 
     # Audio Parameters
     sample_rate: int = Field(default=16000, alias="SAMPLE_RATE")

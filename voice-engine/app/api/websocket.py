@@ -124,6 +124,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
     """Realtime full-duplex WebSocket connection for local microphone/audio streaming."""
     await websocket.accept()
     manager = get_session_manager()
+    settings = get_settings()
     session: Optional[SessionState] = None
     engine: Optional[SpeechToSpeechEngine] = None
     writer_task: Optional[asyncio.Task] = None
@@ -225,7 +226,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                     sr = int(payload.get("client_sample_rate", 16000))
                     template_type = payload.get("template_type") or payload.get("template", "education")
                     biz_name = payload.get("business_name") or payload.get("institution_name", "Apex University")
-                    agent_name = payload.get("agent_name")
+                    agent_name = payload.get("agent_name") or getattr(settings, "agent_name", "Karthik")
                     greeting_msg = payload.get("greeting_message") or speech_cfg.get("welcome_message") or payload.get("welcome_message")
                     goodbye_msg = payload.get("goodbye_message") or speech_cfg.get("goodbye_message") or payload.get("goodbye_message")
                     sys_prompt = payload.get("system_prompt")
