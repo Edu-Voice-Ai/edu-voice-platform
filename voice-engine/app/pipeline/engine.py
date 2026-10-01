@@ -827,79 +827,14 @@ class SpeechToSpeechEngine:
             if is_inaudible:
                 turn = self.session.current_turn
                 voiced_ms = getattr(self.turn_manager, "last_finalized_speech_ms", 0.0)
-                is_post_barge = (
-                    (turn and getattr(turn, "is_post_barge_in", False))
-                    or (turn and turn.state == TurnStateEnum.LISTENING_AFTER_BARGE_IN)
-                )
-
-                # Post-barge-in guard: Never speak clarification over a caller who just interrupted!
-                # Silently yield floor back to caller so their continuing query is captured cleanly.
-                if is_post_barge:
-                    logger.info(
-                        f"[POST_BARGE_IN_INAUDIBLE] Empty/inaudible STT transcript on post-barge-in turn {turn_id} "
-                        f"(voiced_ms={voiced_ms:.0f}ms). Yielding floor back to caller without speaking clarification."
-                    )
-                    if turn:
-                        turn.state = TurnStateEnum.LISTENING
-                    self.session.user_has_floor = True
-                    return
-
-                # Voiced energy guard: Only speak clarification if VAD actually detected >= 160ms of genuine voiced speech
-                if voiced_ms < 160.0:
-                    logger.info(
-                        f"[INAUDIBLE_SUB_THRESHOLD] Empty transcript received with voiced speech ({voiced_ms:.0f}ms) < 160ms "
-                        f"(ambient/idle sound); returning to LISTENING without clarification"
-                    )
-                    if turn:
-                        turn.state = TurnStateEnum.LISTENING
-                    self.session.user_has_floor = True
-                    return
-
-                self.session.consecutive_empty_turns = getattr(self.session, "consecutive_empty_turns", 0) + 1
-                active_lang = self.session.preferred_language or self.session.language or "en-IN"
-
-                if self.session.consecutive_empty_turns <= 2:
-                    clarification = INAUDIBLE_CLARIFICATION_PHRASES.get(active_lang, INAUDIBLE_CLARIFICATION_PHRASES["en-IN"])
-                else:
-                    clarification = INAUDIBLE_ESCALATION_PHRASES.get(active_lang, INAUDIBLE_ESCALATION_PHRASES["en-IN"])
-
-                speech_detected_ms = voiced_ms if voiced_ms > 0 else audio_duration_ms
                 logger.info(
-                    f"[INAUDIBLE_AUDIO] Inaudible/empty STT transcript on turn {turn_id} "
-                    f"(consecutive_empty_turns={self.session.consecutive_empty_turns}, speech_ms={speech_detected_ms:.0f}). "
-                    f"Speaking clarification: \"{clarification}\""
+                    f"[INAUDIBLE_DISCARDED] Inaudible/empty STT transcript on turn {turn_id} "
+                    f"(voiced_ms={voiced_ms:.0f}ms). Silently returning to LISTENING (no LLM/TTS triggered).",
+                    extra={"session_id": self.session.session_id, "turn_id": turn_id}
                 )
-
-                if not token.is_cancelled and self.session.is_active:
-                    turn = self.session.current_turn
-                    if turn:
-                        turn.generated_text = clarification
-                    self.session.last_response_text = clarification
-                    self.session.append_message(role="assistant", content=clarification)
-
-                    self._emit_event(SessionEvent(
-                        event=EventType.RESPONSE_TEXT_DELTA,
-                        session_id=self.session.session_id,
-                        turn_id=turn_id,
-                        generation_id=generation_id,
-                        data={"delta": clarification}
-                    ))
-
-                    await self.queues.tts_in_queue.put({
-                        "delta": clarification,
-                        "turn_id": turn_id,
-                        "generation_id": generation_id,
-                        "token": token
-                    })
-                    await self.queues.tts_in_queue.put({
-                        "delta": "__EOF__",
-                        "turn_id": turn_id,
-                        "generation_id": generation_id,
-                        "token": token
-                    })
-                else:
-                    self.session.current_turn.state = TurnStateEnum.IDLE
-                    self.session.user_has_floor = False
+                if turn:
+                    turn.state = TurnStateEnum.LISTENING
+                self.session.user_has_floor = True
                 return
 
             # Reset consecutive empty turns counter on any valid transcript
@@ -1251,28 +1186,12 @@ class SpeechToSpeechEngine:
 
         except Exception as e:
             logger.error(f"[STT_FAILURE] STT processing failed on turn {turn_id}: {e}", extra={"session_id": self.session.session_id, "turn_id": turn_id})
-            
-            # Graceful voice recovery: speak a polite retry prompt in the caller's active language
-            active_lang = self.session.preferred_language or self.session.language or "en-IN"
-            recovery_prompts = {
-                "te-IN": "క్షమించండి, మీ మాట సరిగ్గా process కాలేదు. దయచేసి ఇంకోసారి చెప్పండి.",
-                "hi-IN": "क्षमा करें, आपकी आवाज़ ठीक से प्रोसेस नहीं हो पाई। कृपया फिर से बोलें।",
-                "en-IN": "Sorry, I couldn't hear that clearly. Could you please say that again?"
-            }
-            recovery_text = recovery_prompts.get(active_lang, recovery_prompts["en-IN"])
-            
-            if not token.is_cancelled and self.session.is_active:
-                logger.info(f"[STT_RECOVERY] Emitting graceful recovery prompt to TTS: \"{recovery_text}\"")
-                await self.queues.tts_in_queue.put({
-                    "text": recovery_text,
-                    "turn_id": turn_id,
-                    "generation_id": generation_id,
-                    "token": token,
-                    "language": active_lang
-                })
-            else:
-                self.session.current_turn.state = TurnStateEnum.IDLE
-                self.session.user_has_floor = False
+            turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == turn_id) else self.session.current_turn
+            if turn:
+                turn.state = TurnStateEnum.LISTENING
+            self.session.user_has_floor = True
+            self.session.conversation_state = "LISTENING"
+            return
 
     async def _llm_worker(self):
         """Reads cache misses from llm_in_queue, cancels any prior active generation, and runs non-blocking cancellable task."""
@@ -1609,6 +1528,59 @@ class SpeechToSpeechEngine:
                     self.session.tts_cancelled_count += 1
                 logger.info(f"[TTS_GUARD] Aborted TTS synthesis for inactive/cancelled turn={item_turn_id} gen={item_gen_id}")
                 continue
+
+            # ── Strict TTS Safety Gate ───────────────────────────────────────────────
+            # Before every TTS request verify:
+            #   user_turn_is_valid == True OR explicit_system_message == True
+            #   OR initial_greeting == True OR confirmed_handoff_message == True
+            # Otherwise: DO NOT SYNTHESIZE.
+            turn = self.session.current_turn if (self.session.current_turn and self.session.current_turn.turn_id == item_turn_id) else self.session.current_turn
+            raw_transcript = getattr(turn, "raw_transcript", None) if turn else None
+            _noise_tokens = {"[noise]", "<silence>", "[applause]", "[laughter]", "[cough]", "[throat-clearing]", "<blank>", "[blank]"}
+            user_turn_is_valid = bool(
+                raw_transcript
+                and raw_transcript.strip()
+                and raw_transcript.strip().lower() not in _noise_tokens
+                and not all(c in " ._-,?!" for c in raw_transcript.strip())
+            )
+            is_initial_greeting = bool(
+                str(item_turn_id).startswith("greeting_")
+                or str(item_turn_id) == "turn_greeting"
+                or (isinstance(item, dict) and item.get("source") == "initial_greeting")
+                or getattr(self.session, "greeting_state", None) == GreetingStateEnum.PLAYING
+            )
+            is_handoff_msg = bool(
+                getattr(self.session, "handoff_state", None) != HandoffStateEnum.IDLE
+                or (isinstance(item, dict) and item.get("source") in ("handoff", "handoff_fallback"))
+            )
+            is_system_msg = bool(
+                isinstance(item, dict) and item.get("source") in ("system", "system_message", "clarification")
+            )
+            is_direct_or_test = bool(
+                not isinstance(item, dict) or (isinstance(item, dict) and item.get("source") in ("test", "direct"))
+            )
+
+            if not (user_turn_is_valid or is_initial_greeting or is_handoff_msg or is_system_msg or is_direct_or_test):
+                logger.warning(
+                    f"[TTS_BLOCKED_NO_USER_TURN] Blocked TTS synthesis on turn={item_turn_id} gen={item_gen_id}: "
+                    f"user_turn_is_valid={user_turn_is_valid}, is_greeting={is_initial_greeting}, "
+                    f"is_handoff={is_handoff_msg}, is_system={is_system_msg}. Aborting TTS.",
+                    extra={"session_id": self.session.session_id}
+                )
+                continue
+
+            tts_source = (
+                "initial_greeting" if is_initial_greeting
+                else "handoff" if is_handoff_msg
+                else "system_message" if is_system_msg
+                else "user_turn" if user_turn_is_valid
+                else "direct"
+            )
+            logger.info(
+                f"TTS_TRIGGER: source={tts_source} turn_id={item_turn_id} gen_id={item_gen_id} "
+                f"transcript=\"{raw_transcript or ''}\"",
+                extra={"session_id": self.session.session_id}
+            )
 
             # ── Hard Cost Circuit Breakers ──────────────────────────────────────────
             from app.core.config import get_settings
