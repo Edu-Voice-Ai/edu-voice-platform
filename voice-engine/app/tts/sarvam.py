@@ -309,7 +309,7 @@ class SarvamTTSProvider(TTSProvider):
                         return None
 
             try:
-                # Launch workers concurrently as segments arrive
+                # Launch workers concurrently as segments arrive.
                 async def feeder():
                     nonlocal synth_idx
                     while True:
@@ -323,25 +323,23 @@ class SarvamTTSProvider(TTSProvider):
                         tasks.append(t)
 
                 feeder_task = asyncio.create_task(feeder())
-                
-                # Consume completed tasks in-order as soon as available
+
+                # Phase 1: drain tasks in submission order while feeder is still running.
+                # We must NOT exit when feeder_task.done() because the feeder may have just
+                # appended the last task(s) and exited — we still need to await them.
+                # Strategy: wait for feeder to finish first, then drain any remaining tasks.
+                await feeder_task  # blocks until all segments have been dispatched as tasks
+
+                # Phase 2: now drain every task that was submitted, in submission order.
                 task_idx = 0
-                while True:
+                while task_idx < len(tasks):
                     if cancellation_token and cancellation_token.is_cancelled:
                         break
-                    if task_idx < len(tasks):
-                        curr_t = tasks[task_idx]
-                        task_idx += 1
-                        pcm_res = await curr_t
-                        if pcm_res and not (cancellation_token and cancellation_token.is_cancelled):
-                            await audio_buffer_queue.put(pcm_res)
-                    elif feeder_task.done():
-                        # All segments processed
-                        break
-                    else:
-                        await asyncio.sleep(0.010)
+                    pcm_res = await tasks[task_idx]
+                    task_idx += 1
+                    if pcm_res and not (cancellation_token and cancellation_token.is_cancelled):
+                        await audio_buffer_queue.put(pcm_res)
 
-                await feeder_task
             finally:
                 for t in tasks:
                     if not t.done():

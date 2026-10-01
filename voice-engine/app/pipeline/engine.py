@@ -566,15 +566,29 @@ class SpeechToSpeechEngine:
                     if est_end > 0 and now_ms >= est_end:
                         self.session.mark_playback_finished(force=True)
                 elif cur_turn.state == TurnStateEnum.PROCESSING:
-                    turn_age_ms = now_ms - getattr(cur_turn, "start_time_ms", now_ms)
-                    if turn_age_ms > 7500.0:
-                        logger.warning(
-                            f"[TURN_WATCHDOG] Turn {cur_turn.turn_id} stuck in PROCESSING for {turn_age_ms:.0f}ms. "
-                            f"Force-recovering state to LISTENING."
-                        )
-                        cur_turn.state = TurnStateEnum.LISTENING
-                        self.session.user_has_floor = True
-                        self.session.conversation_state = "LISTENING"
+                    # Use processing_started_at_ms (set when STT ends) rather than start_time_ms
+                    # (set at turn creation, which may be long before the user spoke).
+                    # Also skip the watchdog if TTS synthesis is already active — the turn is making
+                    # legitimate progress and must not be forcibly interrupted mid-generation.
+                    proc_start = getattr(cur_turn, "processing_started_at_ms", 0.0)
+                    if proc_start <= 0.0:
+                        # No PROCESSING timestamp yet — turn hasn't entered pipeline yet, skip.
+                        pass
+                    elif getattr(self.session, "is_bot_speaking", False):
+                        # TTS already started — legitimate audio is flowing, do NOT interrupt.
+                        pass
+                    else:
+                        proc_age_ms = now_ms - proc_start
+                        # 15 000 ms ceiling: Sarvam can take 3-5 s per chunk × up to 3 chunks.
+                        if proc_age_ms > 15000.0:
+                            logger.warning(
+                                f"[TURN_WATCHDOG] Turn {cur_turn.turn_id} stuck in PROCESSING for "
+                                f"{proc_age_ms:.0f}ms (since PROCESSING start). "
+                                f"Force-recovering state to LISTENING."
+                            )
+                            cur_turn.state = TurnStateEnum.LISTENING
+                            self.session.user_has_floor = True
+                            self.session.conversation_state = "LISTENING"
 
             transition = self.turn_manager.handle_speech_frame(
                 vad_res.is_speech,
@@ -661,6 +675,9 @@ class SpeechToSpeechEngine:
 
                 turn = self.session.current_turn
                 turn.state = TurnStateEnum.PROCESSING
+                # Stamp the exact moment this turn entered PROCESSING so the watchdog
+                # measures actual pipeline latency rather than total turn lifetime.
+                turn.processing_started_at_ms = now_ms
                 self._emit_event(SessionEvent(
                     event=EventType.SPEECH_END,
                     session_id=self.session.session_id,
@@ -1878,7 +1895,13 @@ class SpeechToSpeechEngine:
                         self.session.set_generation_state(item_gen_id, GenerationLifecycleState.COMPLETED)
 
                 # Synthesis task completed. If cancelled, perform immediate cleanup;
-                # otherwise ensure playback completion transition is cleanly armed.
+                # otherwise let playback_estimated_end_time_ms (built up by extend_playback_deadline
+                # called for every frame) drive the SPEAKING-watchdog transition.
+                # We never call mark_playback_finished(force=False) here because:
+                #   - force=False schedules a delayed_finish_task that can race with the SPEAKING watchdog.
+                #   - The SPEAKING watchdog already fires when now_ms >= playback_estimated_end_time_ms.
+                #   - Using force=True means the turn transitions to LISTENING as soon as synthesis is
+                #     done AND the deadline has passed — which is the correct semantic for telephony.
                 if (token and token.is_cancelled) or self.session.is_generation_cancelled(item_gen_id):
                     if turn:
                         turn.state = TurnStateEnum.INTERRUPTED
@@ -1889,12 +1912,15 @@ class SpeechToSpeechEngine:
                     self.session.user_has_floor = True
                     self.session.conversation_state = "LISTENING"
                 else:
+                    # Normal completion: frames have been queued to Exotel's buffer.
+                    # The SPEAKING-state watchdog (lines 564-567) will fire when
+                    # playback_estimated_end_time_ms is reached, giving the telephony
+                    # stack time to physically drain the buffer before we open the mic.
+                    # Call force=True only if the deadline has already elapsed (e.g. very
+                    # short response or cancellation-cleared deadline).
                     now_ms = time.time() * 1000
                     est_end = float(self.session.playback_estimated_end_time_ms or 0.0)
-                    if est_end <= now_ms + 50.0:
-                        self.session.mark_playback_finished(force=True)
-                    else:
-                        self.session.mark_playback_finished(force=False)
+                    self.session.mark_playback_finished(force=(est_end <= now_ms + 50.0))
 
             except asyncio.TimeoutError:
                 logger.error(

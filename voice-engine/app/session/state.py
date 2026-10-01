@@ -61,6 +61,9 @@ class EphemeralTurnState:
     state: TurnStateEnum = TurnStateEnum.IDLE
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
     start_time_ms: float = field(default_factory=lambda: time.time() * 1000)
+    # Tracks when this turn actually entered PROCESSING state (STT ended → LLM started).
+    # Different from start_time_ms which records object-creation time (may be before user spoke).
+    processing_started_at_ms: float = 0.0
     user_audio_chunks: List[bytes] = field(default_factory=list)
     raw_transcript: str = ""
     generated_text: str = ""
