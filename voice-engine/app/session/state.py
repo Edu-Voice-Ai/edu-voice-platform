@@ -88,6 +88,7 @@ class SessionState:
     business_name: str = "Apex University"
     template_type: str = "education"
     agent_name: Optional[str] = None
+    voice_id: Optional[str] = None
     agent_config: Optional[Any] = None
     system_prompt: Optional[str] = None
     greeting_message: Optional[str] = None

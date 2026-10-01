@@ -307,7 +307,7 @@ class SpeechToSpeechEngine:
                 else f"Welcome to {self.session.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
             )
             global _GREETING_AUDIO_CACHE
-            greeting_speaker = getattr(self.tts_provider, "default_speaker", "pooja")
+            greeting_speaker = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
             greeting_cache_key = f"{greeting_text}:{greeting_speaker}"
             if greeting_cache_key not in _GREETING_AUDIO_CACHE:
                 pcm_bytes = await self.tts_provider.synthesize_text(greeting_text, language_code="en-IN", speaker=greeting_speaker)

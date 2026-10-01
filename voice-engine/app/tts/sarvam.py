@@ -16,9 +16,9 @@ from app.core.logging import get_logger
 logger = get_logger("tts.sarvam")
 
 # ── Voice Consistency Lock ─────────────────────────────────────────────────
-# "karthik" is the configured voice in Bulbul:v3
+# "pooja" is the authoritative warm counselor voice in Bulbul:v3
 # supported across en-IN, te-IN, hi-IN.
-LOCKED_SPEAKER: str = "karthik"
+LOCKED_SPEAKER: str = "pooja"
 
 
 class SarvamTTSProvider(TTSProvider):
@@ -28,7 +28,8 @@ class SarvamTTSProvider(TTSProvider):
         self,
         api_key: Optional[str] = None,
         model: str = "bulbul:v3",
-        default_speaker: str = "karthik",
+        default_speaker: str = "pooja",
+        voice_id: Optional[str] = None,
         base_url: str = "https://api.sarvam.ai",
         min_chars: int = 35,
         max_chars: int = 200
@@ -36,6 +37,7 @@ class SarvamTTSProvider(TTSProvider):
         self.api_key = api_key
         self.model = model
         self.default_speaker = default_speaker
+        self.voice_id = voice_id
         self.base_url = base_url.rstrip("/")
         self.min_chars = min_chars
         self.max_chars = max_chars
@@ -101,25 +103,39 @@ class SarvamTTSProvider(TTSProvider):
             "Content-Type": "application/json"
         }
         # Enforce configured speaker / voice ID
-        _speaker = self.default_speaker or LOCKED_SPEAKER
-        payload = {
-            "inputs": [clean_text],
-            "target_language_code": language_code,
-            "speaker": _speaker,
-            "model": self.model,
-            "enable_preprocessing": True
-        }
+        _speaker = speaker or self.default_speaker or LOCKED_SPEAKER
+
+        if self.voice_id:
+            payload = {
+                "inputs": [clean_text],
+                "target_language_code": language_code,
+                "voice_id": self.voice_id,
+                "model": self.model,
+                "enable_preprocessing": True
+            }
+            cache_id = self.voice_id
+            log_id = f"voice_id={self.voice_id}"
+        else:
+            payload = {
+                "inputs": [clean_text],
+                "target_language_code": language_code,
+                "speaker": _speaker,
+                "model": self.model,
+                "enable_preprocessing": True
+            }
+            cache_id = _speaker
+            log_id = f"speaker={_speaker}"
 
         # Deduplication cache lookup
         from app.tts.cache import TTSCacheManager
-        cached_pcm = TTSCacheManager.get(clean_text, language_code, _speaker)
+        cached_pcm = TTSCacheManager.get(clean_text, language_code, cache_id)
         if cached_pcm is not None:
-            logger.info(f"[TTS_CACHE] hit=True speaker={_speaker} language={language_code} chars={len(clean_text)}")
+            logger.info(f"[TTS_CACHE] hit=True {log_id} language={language_code} chars={len(clean_text)}")
             return cached_pcm
-        logger.info(f"[TTS_CACHE] hit=False speaker={_speaker} language={language_code} chars={len(clean_text)}")
+        logger.info(f"[TTS_CACHE] hit=False {log_id} language={language_code} chars={len(clean_text)}")
 
         logger.info(
-            f"[TTS_REQUEST] model={self.model} speaker={_speaker} language={language_code} "
+            f"[TTS_REQUEST] model={self.model} {log_id} language={language_code} "
             f"char_count={len(clean_text)}"
         )
 
@@ -150,7 +166,7 @@ class SarvamTTSProvider(TTSProvider):
                 extra={"ttfb_ms": ttfb_ms, "chars": len(clean_text)}
             )
             # Store in deduplication cache
-            TTSCacheManager.put(clean_text, language_code, clean_audio, _speaker)
+            TTSCacheManager.put(clean_text, language_code, clean_audio, cache_id)
             return clean_audio
         except httpx.RequestError as e:
             raise TTSError(f"Sarvam TTS network error: {e}", provider="sarvam")
@@ -197,7 +213,7 @@ class SarvamTTSProvider(TTSProvider):
         chunker = AudioChunker(sample_rate=16000, frame_duration_ms=20)
         delimiters = {".", "!", "?", "।", "\n"}
         # Enforce configured speaker / voice ID
-        active_speaker = self.default_speaker or LOCKED_SPEAKER
+        active_speaker = self.voice_id or self.default_speaker or LOCKED_SPEAKER
 
         # Bounded async queue for pending text chunks to synthesize
         segment_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=10)
