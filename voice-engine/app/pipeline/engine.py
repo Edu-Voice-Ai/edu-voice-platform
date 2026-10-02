@@ -305,7 +305,7 @@ class SpeechToSpeechEngine:
             greeting_text = (
                 self.session.get_greeting_text()
                 if hasattr(self.session, "get_greeting_text")
-                else f"Welcome to {self.session.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+                else f"Welcome to {self.session.institution_name}. How may I help you today?"
             )
             global _GREETING_AUDIO_CACHE
             greeting_speaker = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
@@ -364,7 +364,7 @@ class SpeechToSpeechEngine:
         greeting_text = (
             self.session.get_greeting_text()
             if hasattr(self.session, "get_greeting_text")
-            else f"Welcome to {self.session.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+            else f"Welcome to {self.session.institution_name}. How may I help you today?"
         )
         logger.info(
             f"[INTERACTION_TRACE] session_id={self.session.session_id} event=GREETING_START text=\"{greeting_text}\"",

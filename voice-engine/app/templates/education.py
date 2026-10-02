@@ -65,7 +65,7 @@ class EducationTemplate(BaseAgentTemplate):
 
     def get_greeting(self, session: Any, lang: str = "en-IN") -> str:
         biz_name = getattr(session, "business_name", None) or getattr(session, "institution_name", self.default_business_name)
-        return f"Welcome to {biz_name}. Which language do you prefer? English, Hindi, or Telugu?"
+        return f"Welcome to {biz_name}. How may I help you today?"
 
     def get_goodbye(self, session: Any, lang: str = "en-IN") -> str:
         biz_name = getattr(session, "business_name", None) or getattr(session, "institution_name", self.default_business_name)

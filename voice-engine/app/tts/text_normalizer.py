@@ -160,52 +160,48 @@ class SpeechTextNormalizer:
         working_buffer = re.sub(r'\bPh\.D\b', 'PhD', working_buffer, flags=re.IGNORECASE)
         working_buffer = re.sub(r'\b([A-Za-z])\.([A-Za-z])\b', r'\1\2', working_buffer)
 
-        # 1. Sentence boundaries (. ! ? । \n), Clause boundaries (, ; : —), or Indic conjunction connectors
-        # Clauses must be followed by whitespace and not preceded by digits to prevent breaking numbers like 1,50,000
-        for m in re.finditer(r'(?:([.!?।\n])(?:\s+|$)|(?<!\d)([,;:—])\s+|(?<=\S)\s+(మరియు|లేదా)\s+)', working_buffer):
-            is_connector = bool(m.group(3))
-            end_pos = m.start() if is_connector else m.end()
+        # 1. Prefer complete sentence-terminal punctuation: (. ! ? । \n)
+        # We do NOT treat comma, semicolon, or Indic conjunctions as normal chunk boundaries.
+        # This keeps natural sentences intact (up to ~180 chars) and prevents acoustic/prosody discontinuities.
+        for m in re.finditer(r'([.!?।\n])(?:\s+|$)', working_buffer):
+            end_pos = m.end()
             candidate = cls.normalize_for_speech(working_buffer[:end_pos].strip())
-            delimiter = m.group(1) or m.group(2) or m.group(3)
-            is_sentence_end = bool(delimiter in ".!?।\n")
+            if not candidate:
+                continue
 
-            if is_first_chunk:
-                # First chunk:
-                # - Sentence-ending punctuation: requires candidate >= 25 chars to prevent tiny standalone clips
-                #   like "Hello!" (6 chars) or "Sure!" (5 chars) from dispatching alone when continuation text is streaming.
-                # - Clause punctuation: requires candidate >= 28 chars and <= 60 chars.
-                first_min = 25 if is_sentence_end else 28
-                first_max = max(70, max_chars) if is_sentence_end else 60
-                if len(candidate) >= first_min and len(candidate) <= first_max and cls.is_safe_chunk_boundary(candidate):
-                    remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
-                    return candidate, remaining
-            else:
-                # Non-first chunks: require at least min_chars (or complete sentence >= 25 chars)
-                min_boundary_len = min(min_chars, 25) if is_sentence_end else max(min_chars, 30)
-                if len(candidate) >= min_boundary_len and cls.is_safe_chunk_boundary(candidate):
-                    remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
-                    return candidate, remaining
+            # Verify that the punctuation mark is not part of a protected abbreviation or title
+            if not cls.is_safe_chunk_boundary(candidate):
+                continue
 
-        # 2. If buffer exceeds max_chars, find safe clause or word boundary BEFORE max_chars
-        if len(buffer) >= max_chars:
-            # 2a. Clause delimiters (, ; : -)
-            clause_matches = list(re.finditer(r'([,;:\-])(?:\s+)', buffer[:max_chars]))
+            # When streaming, avoid dispatching tiny fragments (< 20 chars, e.g. "Sure!", "Yes.")
+            # early if more text is being generated.
+            if is_first_chunk and len(candidate) < 20:
+                continue
+
+            remaining = working_buffer[end_pos:].lstrip()
+            return candidate, remaining
+
+        # 2. Oversized Fallback: If buffer exceeds max_chars without sentence-terminal punctuation,
+        # find safe clause boundary (, ; : -) or whitespace BEFORE max_chars to avoid buffer overflow.
+        if len(working_buffer) >= max_chars:
+            # 2a. Clause delimiters (, ; : -) followed by whitespace, not preceded by digits
+            clause_matches = list(re.finditer(r'(?<!\d)([,;:\-])\s+', working_buffer[:max_chars]))
             if clause_matches:
                 for cm in reversed(clause_matches):
                     end_pos = cm.end()
-                    candidate = buffer[:end_pos].strip()
+                    candidate = cls.normalize_for_speech(working_buffer[:end_pos].strip())
                     if len(candidate) >= min_chars and cls.is_safe_chunk_boundary(candidate):
-                        remaining = buffer[end_pos:].lstrip()
+                        remaining = working_buffer[end_pos:].lstrip()
                         return candidate, remaining
 
             # 2b. Word boundary (whitespace)
-            space_matches = list(re.finditer(r'\s+', buffer[:max_chars]))
+            space_matches = list(re.finditer(r'\s+', working_buffer[:max_chars]))
             if space_matches:
                 for sm in reversed(space_matches):
                     end_pos = sm.end()
-                    candidate = buffer[:end_pos].strip()
+                    candidate = cls.normalize_for_speech(working_buffer[:end_pos].strip())
                     if len(candidate) >= min_chars and cls.is_safe_chunk_boundary(candidate):
-                        remaining = buffer[end_pos:].lstrip()
+                        remaining = working_buffer[end_pos:].lstrip()
                         return candidate, remaining
 
         return None, buffer
