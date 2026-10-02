@@ -71,23 +71,56 @@ class SpeechTextNormalizer:
         - Multi-word capitalized names (e.g. 'Aravind Kumar', 'Lokesh Reddy')
         - Name + honorific combinations (e.g. 'Aravind garu', 'అరవింద్ గారు')
         - Multi-word course names (e.g. 'Computer Science', 'BTech CSE')
+        - Business / institution names (e.g. 'Apex University')
+        - Prepositions and conjunctions (e.g. 'in', 'and', 'from', 'at', 'of')
         """
         stripped = text.strip()
         if not stripped:
             return True
 
         tokens = stripped.split()
-        if tokens:
-            last_word = tokens[-1].strip(".,!?:;\"'")
-            if last_word.lower() in ["mr", "ms", "dr", "sri", "prof", "గౌరవనీయ", "డాక్టర్", "శ్రీ"]:
+        if not tokens:
+            return True
+
+        last_word = tokens[-1].strip(".,!?:;\"'()[]")
+        last_word_lower = last_word.lower()
+
+        # 1. Trailing prepositions and conjunctions must NEVER end a spoken chunk
+        dangling_connectors = {
+            "in", "and", "or", "of", "for", "at", "to", "from", "with", "by", "on", "into", "onto",
+            "as", "the", "a", "an", "is", "are", "was", "were", "and/or",
+            "మరియు", "లేదా", "యొక్క", "లో", "నుండి", "తో", "గా", "కోసం"
+        }
+        if last_word_lower in dangling_connectors:
+            return False
+
+        # 2. Honorifics and titles
+        honorifics = {"mr", "ms", "mrs", "dr", "sri", "prof", "shri", "smt", "గౌరవనీయ", "డాక్టర్", "శ్రీ"}
+        if last_word_lower in honorifics:
+            return False
+
+        # 3. Institution / organization prefix words (e.g. 'Apex' before 'University')
+        org_prefixes = {"apex", "saint", "st", "mount"}
+        if last_word_lower in org_prefixes:
+            return False
+
+        # 4. Degree / branch abbreviations (e.g. 'BTech' before 'Computer Science', 'CSE', etc.)
+        degree_words = {"btech", "mtech", "bba", "mba", "bsc", "msc", "phd", "b.tech", "m.tech"}
+        if last_word_lower in degree_words and stripped[-1] not in [".", "!", "?", "।"]:
+            return False
+
+        # 5. Course / department prefix words
+        course_prefixes = {"computer", "electronics", "data", "mechanical", "electrical", "civil"}
+        if last_word_lower in course_prefixes:
+            return False
+
+        if len(tokens) == 1:
+            # If single word has clause/sentence punctuation (e.g. 'Sure,', 'Hello!', 'Yes.'), it's safe
+            if stripped[-1] in [",", ".", "!", "?", "।", ":", ";"]:
+                return True
+            # Unpunctuated single title word (e.g. 'Aravind') should wait for last name
+            if last_word.istitle() and len(last_word) > 1:
                 return False
-            if len(tokens) == 1:
-                # If single word has clause/sentence punctuation (e.g. 'Sure,', 'Hello!', 'Yes.'), it's safe
-                if stripped[-1] in [",", ".", "!", "?", "।", ":", ";"]:
-                    return True
-                # Unpunctuated single title word (e.g. 'Aravind') should wait for last name
-                if last_word.istitle() and len(last_word) > 1:
-                    return False
 
         return True
 
@@ -95,26 +128,20 @@ class SpeechTextNormalizer:
     def extract_safe_chunk(
         cls,
         buffer: str,
-        min_chars: int = 12,
+        min_chars: int = 35,
         max_chars: int = 250,
         is_eof: bool = False,
         is_first_chunk: bool = False
     ) -> tuple[str | None, str]:
         """
         Extracts a safe linguistic chunk from the text buffer.
-        NEVER splits inside a word, acronym, name, or course title.
+        NEVER splits inside a word, acronym, name, course title, or between prepositions and nouns.
 
-        When is_first_chunk is True, extraction rules for the FIRST chunk:
-          - Sentence-ending punctuation (.!?।): fires immediately when candidate >= 3 chars.
-            Reason: guarantees genuinely short complete responses ("Yes.", "Sure!", "OK.") are
-            dispatched to Sarvam in a single call without waiting for nonexistent additional text.
-          - Mid-sentence clause punctuation (,;:—): requires candidate >= 20 chars before
-            dispatching as first chunk.
-            Reason: prevents "Yes," (3 chars before comma) from firing as a standalone first
-            TTS request when the LLM is already streaming the continuation ("I can help you...").
-            Sarvam charges the same ~1,600 ms per API call regardless of input length, so
-            combining "Yes, I can help you" into one call eliminates a wasted round-trip.
-          - Word-boundary fallback: fires when buffer accumulates >= 20 chars with no punctuation.
+        Rules:
+          - Does NOT dispatch standalone tiny fragments ("Hello!", "Sure!") when more text is available.
+          - Prefers complete sentences.
+          - When is_eof is True (entire response or stream ended), flushes the full remaining text as a clean unit.
+          - Never splits unpunctuated text at arbitrary character boundaries.
         
         Returns:
             (extracted_chunk, remaining_buffer)
@@ -140,33 +167,24 @@ class SpeechTextNormalizer:
             end_pos = m.start() if is_connector else m.end()
             candidate = cls.normalize_for_speech(working_buffer[:end_pos].strip())
             delimiter = m.group(1) or m.group(2) or m.group(3)
+            is_sentence_end = bool(delimiter in ".!?।\n")
 
             if is_first_chunk:
-                # Sentence-ending punctuation: fire on complete sentences up to 50 chars.
-                # e.g. "Sure, I can help with admissions." (34 chars) -> ONE clean first chunk!
-                is_sentence_end = delimiter in ".!?।\n"
-                first_chunk_min = 3 if is_sentence_end else 20
-                first_chunk_max = 50 if is_sentence_end else 40
-                if len(candidate) >= first_chunk_min and len(candidate) <= first_chunk_max and cls.is_safe_chunk_boundary(candidate):
+                # First chunk:
+                # - Sentence-ending punctuation: requires candidate >= 25 chars to prevent tiny standalone clips
+                #   like "Hello!" (6 chars) or "Sure!" (5 chars) from dispatching alone when continuation text is streaming.
+                # - Clause punctuation: requires candidate >= 28 chars and <= 60 chars.
+                first_min = 25 if is_sentence_end else 28
+                first_max = max(70, max_chars) if is_sentence_end else 60
+                if len(candidate) >= first_min and len(candidate) <= first_max and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
             else:
-                # Non-first chunks: require at least min_chars (or full sentence end)
-                min_boundary_len = min(min_chars, 20) if delimiter in ".!?।\n" else min_chars
+                # Non-first chunks: require at least min_chars (or complete sentence >= 25 chars)
+                min_boundary_len = min(min_chars, 25) if is_sentence_end else max(min_chars, 30)
                 if len(candidate) >= min_boundary_len and cls.is_safe_chunk_boundary(candidate):
                     remaining = working_buffer[m.start():].lstrip() if is_connector else working_buffer[end_pos:].lstrip()
                     return candidate, remaining
-
-        # 1b. Fallback: if buffer reaches 20+ chars without early punctuation, emit at word boundary (<= 35 chars)
-        if is_first_chunk and len(working_buffer) >= 20:
-            first_slice = working_buffer[:35]
-            space_matches = list(re.finditer(r'\s+', first_slice))
-            if space_matches:
-                for sm in reversed(space_matches):
-                    candidate = cls.normalize_for_speech(working_buffer[:sm.start()].strip())
-                    if len(candidate) >= 4 and cls.is_safe_chunk_boundary(candidate):
-                        remaining = working_buffer[sm.end():].lstrip()
-                        return candidate, remaining
 
         # 2. If buffer exceeds max_chars, find safe clause or word boundary BEFORE max_chars
         if len(buffer) >= max_chars:

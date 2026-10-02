@@ -177,24 +177,24 @@ class TestAckPlusContinuation:
 
 class TestSentenceEndExclamation:
     """
-    '!' marks a genuine sentence end. 'Sure!' is a valid TTS unit.
-    We allow it to fire at 5+ chars since it's semantically complete.
-    The overlapped pipeline means 'We offer...' chunk already starts synthesizing.
+    Exclamatory affirmations ('Sure!', 'Absolutely!') followed by continuation
+    must NOT be dispatched as tiny standalone fragments when continuation text follows.
+    They should be synthesized as natural, continuous utterances.
     """
 
     def test_sure_exclamation_continuation(self):
         response = "Sure! We offer BTech and MBA programs."
         segs = all_segments(response)
-        assert len(segs) >= 2
-        assert segs[0] == "Sure!"
-        # Second segment carries the actual content
-        assert "BTech" in " ".join(segs) or "MBA" in " ".join(segs)
+        assert len(segs) == 1
+        assert "Sure!" in segs[0]
+        assert "BTech" in segs[0]
 
     def test_absolutely_exclamation(self):
         response = "Absolutely! Apex University offers BTech programs."
         segs = all_segments(response)
-        assert segs[0] == "Absolutely!"
-        assert len(segs) >= 2
+        assert len(segs) == 1
+        assert "Absolutely!" in segs[0]
+        assert "Apex University" in segs[0]
 
 
 # ─── GROUP 4: Multi-sentence English response ────────────────────────────────

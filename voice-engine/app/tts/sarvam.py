@@ -256,10 +256,16 @@ class SarvamTTSProvider(TTSProvider):
                     if cancellation_token and cancellation_token.is_cancelled:
                         break
                     buf += delta
+
+                    # Rule: For short responses under ~100 characters, do not prematurely split while stream is active.
+                    # Wait for stream EOF so the short response is synthesized as ONE single natural TTS request.
+                    if is_first_chunk and len(buf) < 100:
+                        continue
+
                     while True:
                         seg, buf = SpeechTextNormalizer.extract_safe_chunk(
                             buf,
-                            min_chars=6 if is_first_chunk else self.min_chars,
+                            min_chars=self.min_chars,
                             max_chars=self.max_chars,
                             is_eof=False,
                             is_first_chunk=is_first_chunk
@@ -273,7 +279,7 @@ class SarvamTTSProvider(TTSProvider):
                 if not (cancellation_token and cancellation_token.is_cancelled):
                     final_seg, _ = SpeechTextNormalizer.extract_safe_chunk(
                         buf,
-                        min_chars=6 if is_first_chunk else self.min_chars,
+                        min_chars=self.min_chars,
                         max_chars=self.max_chars,
                         is_eof=True,
                         is_first_chunk=is_first_chunk
@@ -284,62 +290,76 @@ class SarvamTTSProvider(TTSProvider):
                 await segment_queue.put(None)  # Sentinel EOF
 
         # 2. Parallel Overlapped TTS Synthesizer task: consumes segments and synthesizes concurrently
-        async def synthesizer():
-            synth_idx = 0
-            tasks: list[asyncio.Task] = []
-            sem = asyncio.Semaphore(2)  # Bounded concurrency: maximum 2 concurrent Sarvam synthesis tasks
-            
-            async def synth_worker(idx: int, segment_text: str) -> Optional[bytes]:
+        synth_idx = 0
+        tasks: list[asyncio.Task] = []
+        task_segments: dict[int, str] = {}
+        sem = asyncio.Semaphore(2)  # Bounded concurrency: maximum 2 concurrent Sarvam synthesis tasks
+
+        async def synth_worker(idx: int, segment_text: str) -> Optional[bytes]:
+            if cancellation_token and cancellation_token.is_cancelled:
+                return None
+            async with sem:
                 if cancellation_token and cancellation_token.is_cancelled:
                     return None
-                async with sem:
+                try:
+                    logger.info(f"[TTS_DEBUG] TEXT_CHUNK_{idx}: \"{segment_text}\" (chars={len(segment_text)})")
+                    t_start = time.time() * 1000
+                    pcm = await self.synthesize_text(segment_text, language_code=language_code, speaker=active_speaker)
+                    t_elapsed = (time.time() * 1000) - t_start
                     if cancellation_token and cancellation_token.is_cancelled:
                         return None
-                    try:
-                        logger.info(f"[TTS_DEBUG] TEXT_CHUNK_{idx}: \"{segment_text}\" (chars={len(segment_text)})")
-                        t_start = time.time() * 1000
-                        pcm = await self.synthesize_text(segment_text, language_code=language_code, speaker=active_speaker)
-                        t_elapsed = (time.time() * 1000) - t_start
-                        if cancellation_token and cancellation_token.is_cancelled:
-                            return None
-                        logger.info(f"[TTS] chunk_id={idx} chars={len(segment_text)} synth_ms={t_elapsed:.1f}")
-                        return pcm
-                    except Exception as e:
-                        logger.error(f"TTS synthesis error for segment '{segment_text[:30]}...': {e}")
-                        return None
+                    dur_ms = (len(pcm) / 32000.0) * 1000.0 if pcm else 0.0
+                    logger.info(
+                        f"[TTS] chunk_id={idx} chars={len(segment_text)} synth_ms={t_elapsed:.1f} audio_dur_ms={dur_ms:.1f} bytes={len(pcm) if pcm else 0}"
+                    )
+                    return pcm
+                except Exception as e:
+                    logger.error(f"TTS synthesis error for segment '{segment_text[:30]}...': {e}")
+                    return None
 
+        async def feeder():
+            nonlocal synth_idx
+            while True:
+                if cancellation_token and cancellation_token.is_cancelled:
+                    break
+                seg = await segment_queue.get()
+                if seg is None:
+                    break
+                synth_idx += 1
+                task_segments[synth_idx] = seg
+                t = asyncio.create_task(synth_worker(synth_idx, seg))
+                tasks.append(t)
+
+        feeder_task = asyncio.create_task(feeder())
+
+        async def synthesizer():
             try:
-                # Launch workers concurrently as segments arrive.
-                async def feeder():
-                    nonlocal synth_idx
-                    while True:
-                        if cancellation_token and cancellation_token.is_cancelled:
-                            break
-                        seg = await segment_queue.get()
-                        if seg is None:
-                            break
-                        synth_idx += 1
-                        t = asyncio.create_task(synth_worker(synth_idx, seg))
-                        tasks.append(t)
+                # Phase 1: wait for feeder to dispatch all text segments
+                await feeder_task
 
-                feeder_task = asyncio.create_task(feeder())
-
-                # Phase 1: drain tasks in submission order while feeder is still running.
-                # We must NOT exit when feeder_task.done() because the feeder may have just
-                # appended the last task(s) and exited — we still need to await them.
-                # Strategy: wait for feeder to finish first, then drain any remaining tasks.
-                await feeder_task  # blocks until all segments have been dispatched as tasks
-
-                # Phase 2: now drain every task that was submitted, in submission order.
+                # Phase 2: drain every task in submission order into audio_buffer_queue
                 task_idx = 0
                 while task_idx < len(tasks):
                     if cancellation_token and cancellation_token.is_cancelled:
                         break
-                    pcm_res = await tasks[task_idx]
+                    cur_t = tasks[task_idx]
+                    while not cur_t.done():
+                        if cancellation_token and cancellation_token.is_cancelled:
+                            cur_t.cancel()
+                            break
+                        try:
+                            await asyncio.wait_for(asyncio.shield(cur_t), timeout=0.05)
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            pass
+                    if cancellation_token and cancellation_token.is_cancelled:
+                        break
+                    try:
+                        pcm_res = await cur_t
+                    except (asyncio.CancelledError, Exception):
+                        pcm_res = None
                     task_idx += 1
                     if pcm_res and not (cancellation_token and cancellation_token.is_cancelled):
                         await audio_buffer_queue.put(pcm_res)
-
             finally:
                 for t in tasks:
                     if not t.done():
@@ -351,35 +371,95 @@ class SarvamTTSProvider(TTSProvider):
 
         last_chunk_end_time: Optional[float] = None
         chunk_index = 0
+        total_audio_played_bytes = 0
+        max_inter_chunk_gap = 0.0
 
         try:
             while True:
                 if cancellation_token and cancellation_token.is_cancelled:
                     break
 
-                pcm_chunk = await audio_buffer_queue.get()
+                pcm_chunk = None
+                while True:
+                    if cancellation_token and cancellation_token.is_cancelled:
+                        break
+                    try:
+                        pcm_chunk = await asyncio.wait_for(audio_buffer_queue.get(), timeout=0.05)
+                        break
+                    except asyncio.TimeoutError:
+                        continue
+
+                if cancellation_token and cancellation_token.is_cancelled:
+                    break
                 if pcm_chunk is None:
                     break
 
                 chunk_index += 1
+                chunk_dur_ms = (len(pcm_chunk) / 32000.0) * 1000.0
+
+                # ── Playout Pre-Buffering Gate on Chunk 1 ──────────────────────────────
+                # For multi-chunk responses, ensure audio queue won't starve between Chunk 1 and Chunk 2:
+                # Target approximately 1.5–2.0 seconds of audio OR wait until Chunk 2 finishes synthesis.
+                if chunk_index == 1:
+                    is_single_chunk = feeder_task.done() and len(tasks) <= 1
+                    t_prebuf_start = time.time()
+                    prebuffer_wait_ms = 0.0
+
+                    if not is_single_chunk and chunk_dur_ms < 1800.0 and len(tasks) > 1:
+                        next_task = tasks[1]
+                        if not next_task.done():
+                            try:
+                                # Overlap playback release: wait for chunk 2 or max 2.0s safety timeout
+                                await asyncio.wait_for(asyncio.shield(next_task), timeout=2.0)
+                            except (asyncio.TimeoutError, asyncio.CancelledError):
+                                pass
+                        prebuffer_wait_ms = (time.time() - t_prebuf_start) * 1000.0
+
+                    logger.info(
+                        f"[TTS_PREBUFFER] chunks={len(tasks)} chunk1_dur_ms={chunk_dur_ms:.1f} "
+                        f"prebuffer_wait_ms={prebuffer_wait_ms:.1f} single_chunk={is_single_chunk}"
+                    )
+
                 now = time.time() * 1000
                 if last_chunk_end_time is not None:
                     inter_chunk_gap = now - last_chunk_end_time
-                    logger.info(f"[TTS_CONTINUITY] Chunk {chunk_index} play: inter-chunk gap = {inter_chunk_gap:.1f}ms, queue_depth={audio_buffer_queue.qsize()}")
+                    if inter_chunk_gap > max_inter_chunk_gap:
+                        max_inter_chunk_gap = inter_chunk_gap
+                    logger.info(
+                        f"[TTS_CONTINUITY] Chunk {chunk_index} play: inter-chunk gap = {inter_chunk_gap:.1f}ms, queue_depth={audio_buffer_queue.qsize()}"
+                    )
                 else:
-                    logger.info(f"[TTS_CONTINUITY] Chunk 1 play: start playing, queue_depth={audio_buffer_queue.qsize()}")
+                    logger.info(
+                        f"[TTS_CONTINUITY] Chunk 1 play: start playing (dur={chunk_dur_ms:.1f}ms), queue_depth={audio_buffer_queue.qsize()}"
+                    )
 
                 for frame in chunker.feed(pcm_chunk):
                     if cancellation_token and cancellation_token.is_cancelled:
                         break
+                    total_audio_played_bytes += len(frame.data)
                     yield TTSAudioChunk(frame=frame, is_final=False)
 
                 last_chunk_end_time = time.time() * 1000
 
             final_frame = chunker.flush()
             if final_frame and not (cancellation_token and cancellation_token.is_cancelled):
+                total_audio_played_bytes += len(final_frame.data)
                 yield TTSAudioChunk(frame=final_frame, is_final=True)
+
+            total_audio_sec = total_audio_played_bytes / 32000.0
+            full_resp_text = " ".join(task_segments.values())
+            logger.info(
+                f"[TTS_RESPONSE_SUMMARY] text=\"{full_resp_text}\" tts_requests={len(tasks)} "
+                f"total_chars={len(full_resp_text)} total_audio_sec={total_audio_sec:.2f}s "
+                f"max_inter_chunk_gap_ms={max_inter_chunk_gap:.1f}ms"
+            )
 
         finally:
             segmenter_task.cancel()
+            feeder_task.cancel()
             synthesizer_task.cancel()
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
