@@ -104,7 +104,7 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
     conv_manager = ConversationManager(rag_provider=rag, tool_registry=registry)
 
     speech_cfg = getattr(session, "speech_config", None) or {}
-    vad_silence = speech_cfg.get("vad_silence_threshold_ms") or settings.normal_silence_ms
+    vad_silence = speech_cfg.get("vad_silence_threshold_ms") or settings.effective_conversational_silence_ms
 
     return SpeechToSpeechEngine(
         session=session,

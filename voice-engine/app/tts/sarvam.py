@@ -32,7 +32,8 @@ class SarvamTTSProvider(TTSProvider):
         voice_id: Optional[str] = None,
         base_url: str = "https://api.sarvam.ai",
         min_chars: int = 35,
-        max_chars: int = 200
+        max_chars: int = 200,
+        first_chunk_min_chars: Optional[int] = None
     ):
         self.api_key = api_key
         self.model = model
@@ -41,6 +42,7 @@ class SarvamTTSProvider(TTSProvider):
         self.base_url = base_url.rstrip("/")
         self.min_chars = min_chars
         self.max_chars = max_chars
+        self.first_chunk_min_chars = first_chunk_min_chars
         self._client: Optional[httpx.AsyncClient] = None
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -266,6 +268,10 @@ class SarvamTTSProvider(TTSProvider):
         # Enforce configured speaker / voice ID
         active_speaker = self.voice_id or self.default_speaker or LOCKED_SPEAKER
 
+        from app.core.config import get_settings
+        cfg = get_settings()
+        first_chunk_min_chars = self.first_chunk_min_chars or cfg.effective_first_chunk_min_chars
+
         # Bounded async queue for pending text chunks to synthesize
         segment_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=10)
         # Bounded async queue for synthesized PCM byte buffers
@@ -281,11 +287,11 @@ class SarvamTTSProvider(TTSProvider):
                         break
                     buf += delta
 
-                    # For short conversational responses (under ~60 chars like greetings/acknowledgments),
+                    # For short conversational responses (under first_chunk_min_chars like greetings/acknowledgments),
                     # allow the full utterance to accumulate so it synthesizes as ONE natural TTS request.
-                    # Once text reaches a substantial sentence (>= 60 chars), dispatch immediately to overlap
+                    # Once text reaches a substantial sentence (>= first_chunk_min_chars), dispatch immediately to overlap
                     # TTS synthesis with subsequent LLM token generation.
-                    if is_first_chunk and len(buf) < 60:
+                    if is_first_chunk and len(buf) < first_chunk_min_chars:
                         continue
 
                     while True:

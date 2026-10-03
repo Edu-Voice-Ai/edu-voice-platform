@@ -65,11 +65,31 @@ class Settings(BaseSettings):
     max_tts_chars_per_call: int = Field(default=5000, alias="MAX_TTS_CHARS_PER_CALL")
     enable_startup_tts_precache: bool = Field(default=False, alias="ENABLE_STARTUP_TTS_PRECACHE")
 
+    # Controlled Latency Experiment Parameters (Baseline: 350ms/60chars, Experiment: 300ms/45chars)
+    voice_latency_experiment: bool = Field(default=False, alias="VOICE_LATENCY_EXPERIMENT")
+    tts_first_chunk_min_chars: int = Field(default=60, alias="TTS_FIRST_CHUNK_MIN_CHARS")
+    experimental_silence_ms: int = Field(default=300, alias="EXPERIMENTAL_SILENCE_MS")
+    experimental_first_chunk_min_chars: int = Field(default=45, alias="EXPERIMENTAL_FIRST_CHUNK_MIN_CHARS")
+
     # Turn Detection & Structured Input Parameters
     normal_silence_ms: int = Field(default=350, alias="NORMAL_SILENCE_MS")
     short_utterance_silence_ms: int = Field(default=350, alias="SHORT_UTTERANCE_SILENCE_MS")
     language_selection_silence_ms: int = Field(default=350, alias="LANGUAGE_SELECTION_SILENCE_MS")
     structured_input_silence_ms: int = Field(default=1200, alias="STRUCTURED_INPUT_SILENCE_MS")
+
+    @property
+    def effective_conversational_silence_ms(self) -> int:
+        """Return experimental silence threshold if experiment flag is active, else baseline normal silence."""
+        if self.voice_latency_experiment:
+            return self.experimental_silence_ms
+        return self.normal_silence_ms
+
+    @property
+    def effective_first_chunk_min_chars(self) -> int:
+        """Return experimental first-chunk character threshold if experiment flag is active, else baseline threshold."""
+        if self.voice_latency_experiment:
+            return self.experimental_first_chunk_min_chars
+        return self.tts_first_chunk_min_chars
     barge_in_confirmation_ms: int = Field(default=180, alias="BARGE_IN_CONFIRMATION_MS")
     barge_in_min_confidence: float = Field(default=0.70, alias="BARGE_IN_MIN_CONFIDENCE")
     barge_in_min_rms: float = Field(default=0.025, alias="BARGE_IN_MIN_RMS")

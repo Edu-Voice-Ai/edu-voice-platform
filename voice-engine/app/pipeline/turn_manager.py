@@ -22,8 +22,8 @@ class TurnManager:
         queues: PipelineQueueBundle,
         min_silence_duration_ms: int = 350,
         normal_silence_ms: int = 350,
-        short_utterance_silence_ms: int = 350,
-        language_selection_silence_ms: int = 350,
+        short_utterance_silence_ms: Optional[int] = None,
+        language_selection_silence_ms: Optional[int] = None,
         structured_input_silence_ms: int = 1200,
         min_speech_duration_ms: int = 60,
         min_barge_in_duration_ms: int = 180,
@@ -37,8 +37,8 @@ class TurnManager:
         self.queues = queues
         self.min_silence_duration_ms = min_silence_duration_ms
         self.normal_silence_ms = normal_silence_ms
-        self.short_utterance_silence_ms = short_utterance_silence_ms
-        self.language_selection_silence_ms = language_selection_silence_ms
+        self.short_utterance_silence_ms = short_utterance_silence_ms if short_utterance_silence_ms is not None else normal_silence_ms
+        self.language_selection_silence_ms = language_selection_silence_ms if language_selection_silence_ms is not None else normal_silence_ms
         self.structured_input_silence_ms = structured_input_silence_ms
         self.min_speech_duration_ms = min_speech_duration_ms
         self.min_barge_in_duration_ms = min_barge_in_duration_ms
@@ -116,7 +116,7 @@ class TurnManager:
             return float(self.language_selection_silence_ms)
 
         # If caller / fixture explicitly specified a custom min_silence_duration_ms
-        if self.min_silence_duration_ms not in (350, 450, 650):
+        if self.min_silence_duration_ms not in (300, 350, 450, 650):
             return float(self.min_silence_duration_ms)
 
         # Adaptive conversational endpointing
