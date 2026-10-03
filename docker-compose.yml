@@ -1,0 +1,45 @@
+# ==============================================================================
+# Edu-Voice-AI — Local Development Docker Compose Specification
+# ==============================================================================
+# Usage:
+#   docker compose build
+#   docker compose up -d
+#   docker compose logs -f
+# ==============================================================================
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: edu-voice-ai-gateway:local
+    container_name: edu-voice-ai-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - TELEPHONY_SIGNATURE_VERIFICATION_ENABLED=false
+      - TELEPHONY_MAX_ACTIVE_SESSIONS=500
+      - TELEPHONY_MAX_AUDIO_QUEUE_SIZE=500
+      - TELEPHONY_SESSION_TIMEOUT_SECONDS=1800
+      - TELEPHONY_MAX_SESSION_DURATION_SECONDS=3600
+      - TELEPHONY_RATE_LIMIT_CONNECTIONS_PER_MIN=60
+      - TELEPHONY_WS_PING_INTERVAL_SECONDS=20
+      - TELEPHONY_WS_PING_TIMEOUT_SECONDS=10
+      - BACKEND_INTERNAL_URL=http://edu-voice-ai-backend:8000
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-local_dev_internal_key}
+      - DID_RESOLVE_TIMEOUT_MS=2000
+      - TELEPHONY_VOICE_ENGINE_WS_URL=${TELEPHONY_VOICE_ENGINE_WS_URL:-wss://voice-test.gentechs.in/ws/voice}
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  default:
+    name: yasin-gateway_default

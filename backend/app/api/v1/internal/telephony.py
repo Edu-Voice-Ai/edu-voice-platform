@@ -8,10 +8,10 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from app.core.exceptions import AppException
 from app.core.logging import logger
-from app.db.session import get_db
+from app.db.session import get_db, get_db_readonly
 from app.db.models.phone import PhoneNumber, PhoneAssignment
 from app.db.models.organization import Organization
 from app.db.models.agent import Agent, AgentConfig
@@ -70,7 +70,7 @@ def normalize_did(raw: str) -> str:
 )
 async def resolve_did(
     payload: DIDResolveRequest,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_readonly),
 ) -> SuccessResponse[DIDResolveResponse]:
     """
     Internal service endpoint resolving incoming DID phone number to tenant, agent, and speech parameters.
@@ -92,11 +92,13 @@ async def resolve_did(
             select(PhoneNumber)
             .where(PhoneNumber.phone_number == normalized_number)
             .options(
-                selectinload(PhoneNumber.organization),
-                selectinload(PhoneNumber.assignment).selectinload(PhoneAssignment.agent).selectinload(Agent.config),
+                joinedload(PhoneNumber.organization),
+                joinedload(PhoneNumber.assignment).joinedload(PhoneAssignment.agent).joinedload(Agent.config),
             )
         )
         result = await db.execute(stmt)
+        if hasattr(result, "unique"):
+            result = result.unique()
         phone = result.scalar_one_or_none()
     except (SQLAlchemyError, OSError) as exc:
         logger.error(f"Database error during DID resolution for '{normalized_number}': {exc}")
