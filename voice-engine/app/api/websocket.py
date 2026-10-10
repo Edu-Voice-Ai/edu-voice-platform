@@ -77,7 +77,7 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
     elif tts_prov == "mock":
         tts = MockTTSProvider(sample_rate=settings.sample_rate)
     elif settings.sarvam_api_key:
-        effective_voice_id = getattr(session, "voice_id", None) or (session.speech_config.get("voice_id") if session.speech_config else None) or settings.voice_id
+        effective_voice_id = getattr(settings, "voice_id", None) or getattr(session, "voice_id", None) or (session.speech_config.get("voice_id") if session.speech_config else None)
         tts = SarvamTTSProvider(
             api_key=settings.sarvam_api_key,
             model=settings.tts_model,
@@ -236,7 +236,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                     allow_barge_in = payload.get("allow_barge_in", speech_cfg.get("allow_barge_in", True))
                     max_call_duration_seconds = payload.get("max_call_duration_seconds", speech_cfg.get("max_call_duration_seconds"))
 
-                    session_voice_id = payload.get("voice_id") or speech_cfg.get("voice_id") or getattr(settings, "voice_id", None)
+                    session_voice_id = getattr(settings, "voice_id", None) or payload.get("voice_id") or speech_cfg.get("voice_id")
 
                     session = await manager.create_session(
                         session_id=sess_id,
