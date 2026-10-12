@@ -71,13 +71,30 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
         llm = MockLLMProvider()
 
     # TTS (Supports Sarvam primary, ElevenLabs fallback, and Mock configurable via TTS_PROVIDER)
+    session_voice_id = getattr(session, "voice_id", None)
+    if isinstance(session_voice_id, str):
+        session_voice_id = session_voice_id.strip() or None
+
+    session_speech_cfg = getattr(session, "speech_config", None) or {}
+    speech_cfg_voice = session_speech_cfg.get("voice_id") if isinstance(session_speech_cfg, dict) else None
+    if isinstance(speech_cfg_voice, str):
+        speech_cfg_voice = speech_cfg_voice.strip() or None
+
+    settings_voice_id = getattr(settings, "voice_id", None)
+    if isinstance(settings_voice_id, str):
+        settings_voice_id = settings_voice_id.strip() or None
+
+    effective_voice_id = session_voice_id or speech_cfg_voice or settings_voice_id
+
     tts_prov = getattr(settings, "tts_provider", "sarvam").lower()
     if tts_prov == "elevenlabs" and settings.elevenlabs_api_key:
-        tts = ElevenLabsTTSProvider(api_key=settings.elevenlabs_api_key)
+        tts = ElevenLabsTTSProvider(
+            api_key=settings.elevenlabs_api_key,
+            **({"voice_id": effective_voice_id} if effective_voice_id else {})
+        )
     elif tts_prov == "mock":
         tts = MockTTSProvider(sample_rate=settings.sample_rate)
     elif settings.sarvam_api_key:
-        effective_voice_id = getattr(settings, "voice_id", None) or getattr(session, "voice_id", None) or (session.speech_config.get("voice_id") if session.speech_config else None)
         tts = SarvamTTSProvider(
             api_key=settings.sarvam_api_key,
             model=settings.tts_model,
@@ -87,7 +104,10 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
             max_chars=settings.tts_max_chars
         )
     elif settings.elevenlabs_api_key:
-        tts = ElevenLabsTTSProvider(api_key=settings.elevenlabs_api_key)
+        tts = ElevenLabsTTSProvider(
+            api_key=settings.elevenlabs_api_key,
+            **({"voice_id": effective_voice_id} if effective_voice_id else {})
+        )
     else:
         tts = MockTTSProvider(sample_rate=settings.sample_rate)
 
@@ -236,7 +256,19 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                     allow_barge_in = payload.get("allow_barge_in", speech_cfg.get("allow_barge_in", True))
                     max_call_duration_seconds = payload.get("max_call_duration_seconds", speech_cfg.get("max_call_duration_seconds"))
 
-                    session_voice_id = getattr(settings, "voice_id", None) or payload.get("voice_id") or speech_cfg.get("voice_id")
+                    payload_voice_id = payload.get("voice_id")
+                    if isinstance(payload_voice_id, str):
+                        payload_voice_id = payload_voice_id.strip() or None
+
+                    speech_cfg_voice = speech_cfg.get("voice_id") if isinstance(speech_cfg, dict) else None
+                    if isinstance(speech_cfg_voice, str):
+                        speech_cfg_voice = speech_cfg_voice.strip() or None
+
+                    settings_voice_id = getattr(settings, "voice_id", None)
+                    if isinstance(settings_voice_id, str):
+                        settings_voice_id = settings_voice_id.strip() or None
+
+                    session_voice_id = payload_voice_id or speech_cfg_voice or settings_voice_id
 
                     session = await manager.create_session(
                         session_id=sess_id,
