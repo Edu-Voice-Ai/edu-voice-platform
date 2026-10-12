@@ -190,6 +190,8 @@ class SessionState:
     active_playback_generation_id: Optional[str] = None
     active_playback_turn_id: Optional[str] = None
     active_playback_language: Optional[str] = None
+    active_course: Optional[str] = None
+    is_synthesizing: bool = False
     is_bot_speaking: bool = False
     last_response_text: Optional[str] = None
     turn_count: int = 0
@@ -259,6 +261,8 @@ class SessionState:
 
     def mark_playback_finished(self, force: bool = False):
         """Clear greeting/TTS playback flags when physical playout is done (or forced after telephony pacing)."""
+        if self.is_synthesizing and not self.is_generation_cancelled(self.active_playback_generation_id):
+            return
         now_ms = time.time() * 1000
         existing_task = getattr(self, "_delayed_finish_task", None)
         if force or now_ms >= float(self.playback_estimated_end_time_ms or 0.0):

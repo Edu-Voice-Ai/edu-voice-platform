@@ -147,7 +147,7 @@ class TurnManager:
 
         # Auto-clear physical playback if deadline has elapsed
         est_end = float(getattr(self.session, "playback_estimated_end_time_ms", 0.0) or 0.0)
-        if est_end > 0 and now_ms >= est_end:
+        if est_end > 0 and now_ms >= est_end and not getattr(self.session, "is_synthesizing", False):
             self.session.mark_playback_finished(force=True)
 
         is_greeting = bool(getattr(self.session, "is_greeting_playing", False))
@@ -156,6 +156,7 @@ class TurnManager:
             or (turn and turn.state == TurnStateEnum.SPEAKING)
             or (est_end > 0 and now_ms < est_end)
             or (getattr(self.session, "active_playback_generation_id", None) is not None)
+            or getattr(self.session, "is_synthesizing", False)
         )
         is_active_playback = is_greeting or is_ai_speaking
 
@@ -490,7 +491,10 @@ class TurnManager:
                     return "SPEECH_ENDED"
 
             if not self._is_in_speech:
-                if self._speech_accumulated_ms >= self.min_speech_duration_ms or self.min_speech_duration_ms == 0:
+                # If current turn is actively in PROCESSING state (STT/LLM/TTS in-flight), require sustained speech
+                # (>= 120ms / 6 frames) before confirming turn pre-emption, filtering out transient 60-80ms clicks/breaths.
+                required_speech_ms = 120.0 if (turn and turn.state == TurnStateEnum.PROCESSING) else self.min_speech_duration_ms
+                if self._speech_accumulated_ms >= required_speech_ms or self.min_speech_duration_ms == 0:
                     self._is_in_speech = True
                     self._total_turn_speech_ms = self._speech_accumulated_ms
                     self._silence_accumulated_ms = 0.0

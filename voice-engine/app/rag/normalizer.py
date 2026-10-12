@@ -23,6 +23,7 @@ class NormalizedQuery(BaseModel):
     canonical_keywords: List[str]
     courses_mentioned: List[str]
     raw_query: str
+    fee_type: str = "general"
 
 
 class SemanticQueryNormalizer:
@@ -36,12 +37,29 @@ class SemanticQueryNormalizer:
         "streams", "branch", "branches", "offer", "offering", "offers"
     }
 
-    # Fee Keywords
+    # Fee Keywords (single words)
     FEE_MARKERS = {
-        "fee", "fees", "tuition", "cost", "charge", "charges", "price", "annual",
-        "ఫీజు", "ఫీజులు", "ఫీజ్", "ఖర్చు", "entha", "feesentha",
-        "फीस", "फी", "खर्च", "kitna", "kitni", "paisa", "rupees"
+        "fee", "fees", "tuition", "cost", "charge", "charges", "price", "annual", "pricing", "much",
+        "ఫీజు", "ఫీజులు", "ఫీజ్", "ఖర్చు", "ఖర్చెంత", "ఫీజెంత", "ఎంత", "ఎంతవుతుంది", "ఎంతవుద్ది",
+        "entha", "yentha", "karchu", "kharchu", "feesentha", "fizu", "feezu", "mottham",
+        "फीस", "फी", "खर्च", "शुल्क", "लागत", "कुल", "kitna", "kitni", "kitne", "paisa", "rupees", "daakhila"
     }
+
+    # Fee Multi-Word Phrases
+    FEE_PHRASES = [
+        "how much", "what is the fee", "what is fee", "what are the fees", "how much is",
+        "total cost", "total fee", "total fees", "tuition fee", "tuition fees",
+        "admission fee", "admission fees", "hostel fee", "hostel fees", "one time fee", "onetime fee",
+        "overall cost", "full fee", "full cost",
+        # Telugu / Tenglish phrases
+        "ఫీజు ఎంత", "ఎంత ఫీజు", "ఖర్చు ఎంత", "ఎంత ఖర్చు", "ఫీజ్ ఎంత", "ఎంత అవుతుంది", "ఎంత అవుద్ది",
+        "మొత్తం ఎంత", "మొత్తం ఖర్చు", "మొత్తం ఫీజు", "టోటల్ ఎంత", "టోటల్ ఖర్చు",
+        "fee entha", "fees entha", "karchu entha", "kharchu entha", "yentha fee", "entha fee",
+        "admission fee entha", "hostel fee entha", "total cost entha", "total fee entha",
+        # Hindi / Hinglish phrases
+        "फीस कितनी", "कितनी फीस", "कितना खर्च", "कुल फीस", "कुल लागत", "दाखिला फीस",
+        "kitni fees", "kitna fee", "kitna kharch", "kul fees", "kul kharch"
+    ]
 
     # Eligibility Keywords
     ELIGIBILITY_MARKERS = {
@@ -71,10 +89,32 @@ class SemanticQueryNormalizer:
     MECH_IDENTIFIERS = {"mech", "mechanical", "మెకానికల్", "मैकेनिकल"}
 
     @classmethod
+    def detect_fee_type(cls, text_lower: str) -> str:
+        """Classify fee subcategory: hostel, admission, total, tuition, or general."""
+        if any(k in text_lower for k in ["hostel", "హాస్టల్", "हॉस्टल", "mess", "accommodation"]):
+            return "hostel"
+        if any(k in text_lower for k in [
+            "admission fee", "admission charge", "admission cost", "one time", "onetime",
+            "అడ్మిషన్ ఫీజు", "అడ్మిషన్", "దాఖిలా", "दाखिला फीस", "दाखिला शुल्क", "प्रवेश शुल्क"
+        ]):
+            return "admission"
+        if any(k in text_lower for k in [
+            "total cost", "total fee", "total fees", "overall cost", "full fee", "full cost",
+            "4 year", "4 years", "four year", "4-year",
+            "మొత్తం ఖర్చు", "మొత్తం ఫీజు", "మొత్తం ఎంత", "టోటల్ ఖర్చు", "టోటల్ ఫీజు", "మొత్తం", "టోటల్",
+            "कुल फीस", "कुल लागत", "कुल खर्च", "पूरा खर्च", "कुल"
+        ]):
+            return "total"
+        if any(k in text_lower for k in ["tuition", "ట్యూషన్", "ट्यूशन"]):
+            return "tuition"
+        return "general"
+
+    @classmethod
     def normalize(cls, query_text: str) -> NormalizedQuery:
         """Classify intent and generate canonical search terms for authoritative RAG retrieval."""
         text_lower = query_text.lower().strip()
         words = set(re.findall(r'[\w\u0900-\u097F\u0C00-\u0C7F]+', text_lower))
+        fee_type = cls.detect_fee_type(text_lower)
 
         # Detect specific course mentions
         courses_mentioned = []
@@ -87,15 +127,16 @@ class SemanticQueryNormalizer:
 
         canonical_keywords = []
 
-        # 1. Hostel Inquiry check (checked before general fee to catch 'hostel fee')
-        if words & cls.HOSTEL_MARKERS or any(k in text_lower for k in ["hostel", "హాస్టల్", "हॉस्टल"]):
+        # 1. Hostel Inquiry check (hostel facilities and hostel fees)
+        if fee_type == "hostel" or words & cls.HOSTEL_MARKERS or any(k in text_lower for k in ["hostel", "హాస్టల్", "हॉस्टल"]):
             intent = SemanticIntent.HOSTEL_INQUIRY
             canonical_keywords = ["hostel", "facilities", "ac", "non-ac", "fee", "food"]
             return NormalizedQuery(
                 intent=intent,
                 canonical_keywords=canonical_keywords,
                 courses_mentioned=courses_mentioned,
-                raw_query=query_text
+                raw_query=query_text,
+                fee_type="hostel"
             )
 
         # 2. Admission Dates Inquiry check
@@ -106,7 +147,8 @@ class SemanticQueryNormalizer:
                 intent=intent,
                 canonical_keywords=canonical_keywords,
                 courses_mentioned=courses_mentioned,
-                raw_query=query_text
+                raw_query=query_text,
+                fee_type="general"
             )
 
         # 3. Eligibility Inquiry check
@@ -119,20 +161,34 @@ class SemanticQueryNormalizer:
                 intent=intent,
                 canonical_keywords=canonical_keywords,
                 courses_mentioned=courses_mentioned,
-                raw_query=query_text
+                raw_query=query_text,
+                fee_type="general"
             )
 
-        # 4. Fee Inquiry check
-        if words & cls.FEE_MARKERS or any(k in text_lower for k in ["fee", "fees", "ఫీజు", "ఫీజ్", "ఫీజులు", "फीस", "फी"]):
+        # 4. Fee Inquiry check (evaluated before Course List to catch "How much is the course?")
+        is_fee_query = (
+            bool(words & cls.FEE_MARKERS)
+            or any(p in text_lower for p in cls.FEE_PHRASES)
+            or fee_type in ("admission", "total", "tuition")
+        )
+
+        if is_fee_query:
             intent = SemanticIntent.FEES_INQUIRY
             canonical_keywords = ["fee", "fees", "tuition", "cost", "inr", "annual"]
+            if fee_type == "admission":
+                canonical_keywords.extend(["admission", "one-time"])
+            elif fee_type == "total":
+                canonical_keywords.extend(["total", "4-year", "full"])
+            elif fee_type == "tuition":
+                canonical_keywords.extend(["tuition", "academic"])
             if courses_mentioned:
                 canonical_keywords.extend(courses_mentioned)
             return NormalizedQuery(
                 intent=intent,
                 canonical_keywords=canonical_keywords,
                 courses_mentioned=courses_mentioned,
-                raw_query=query_text
+                raw_query=query_text,
+                fee_type=fee_type
             )
 
         # 5. Course List / Overview check
@@ -145,7 +201,8 @@ class SemanticQueryNormalizer:
                 intent=intent,
                 canonical_keywords=canonical_keywords,
                 courses_mentioned=courses_mentioned,
-                raw_query=query_text
+                raw_query=query_text,
+                fee_type="general"
             )
 
         # Default / Specific Course check
@@ -156,7 +213,8 @@ class SemanticQueryNormalizer:
                 intent=intent,
                 canonical_keywords=canonical_keywords,
                 courses_mentioned=courses_mentioned,
-                raw_query=query_text
+                raw_query=query_text,
+                fee_type="general"
             )
 
         # General inquiry fallback
@@ -164,5 +222,6 @@ class SemanticQueryNormalizer:
             intent=SemanticIntent.GENERAL_INQUIRY,
             canonical_keywords=list(words),
             courses_mentioned=[],
-            raw_query=query_text
+            raw_query=query_text,
+            fee_type="general"
         )

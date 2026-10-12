@@ -88,6 +88,46 @@ class FastQueryRouter:
         "సివిల్": "Civil Engineering"
     }
 
+    EXTERNAL_INSTITUTIONS_MAP = {
+        "loyola college": "Loyola College",
+        "loyola": "Loyola College",
+        "loyola university": "Loyola College",
+        "osmania university": "Osmania University",
+        "osmania": "Osmania University",
+        "jntu": "JNTU",
+        "jntuh": "JNTUH",
+        "cbit": "CBIT",
+        "iit": "IIT",
+        "iit madras": "IIT Madras",
+        "iit hyderabad": "IIT Hyderabad",
+        "nit": "NIT",
+        "nit warangal": "NIT Warangal",
+        "bits pilani": "BITS Pilani",
+        "bits": "BITS Pilani",
+        "ఆంధ్రా యూనివర్సిటీ": "Andhra University",
+        "లయోలా": "Loyola College",
+        "లయోలా కాలేజ్": "Loyola College",
+        "ఉస్మానియా": "Osmania University",
+    }
+
+    @classmethod
+    def detect_external_institution(cls, text: str, current_inst: str) -> Optional[str]:
+        """Detect if the caller is inquiring about an external or unaffiliated institution."""
+        clean = text.lower().strip()
+        words = re.findall(r'[\w\u0900-\u097F\u0C00-\u0C7F]+', clean)
+        curr_lower = (current_inst or "").lower()
+        for w in words:
+            if w in cls.EXTERNAL_INSTITUTIONS_MAP:
+                detected = cls.EXTERNAL_INSTITUTIONS_MAP[w]
+                if detected.lower() not in curr_lower and curr_lower not in detected.lower():
+                    return detected
+        for key, display_name in cls.EXTERNAL_INSTITUTIONS_MAP.items():
+            pattern = rf"(^|\s){re.escape(key)}(\s|$|[?,.!])"
+            if re.search(pattern, clean):
+                if display_name.lower() not in curr_lower and curr_lower not in display_name.lower():
+                    return display_name
+        return None
+
     @classmethod
     def detect_unoffered_course(cls, text: str) -> Optional[str]:
         """Detect if the caller is inquiring about a course/program that is not offered."""
@@ -150,7 +190,25 @@ class FastQueryRouter:
         template_type = getattr(session, "template_type", "education")
 
         if template_type == "education":
-            # 1b. Handle Unoffered Programs Policy: Clear 1-sentence refusal + human counselor offer
+            current_inst = getattr(session, "institution_name", "Apex University") or "Apex University"
+
+            # 1b. Handle External / Unaffiliated Institutions (e.g. Loyola College)
+            external_inst = cls.detect_external_institution(user_text, current_inst)
+            if external_inst:
+                if active_lang == "te-IN":
+                    ext_resp = f"నేను {current_inst} అడ్మిషన్స్ కౌన్సెలర్‌ని. నా దగ్గర {external_inst} ఫీజు లేదా అడ్మిషన్ వివరాలు లేవు. మీరు {current_inst} కోర్సుల వివరాలు తెలుసుకోవాలనుకుంటున్నారా?"
+                elif active_lang == "hi-IN":
+                    ext_resp = f"मैं {current_inst} का प्रवेश काउंसलर हूँ। मेरे पास {external_inst} की फीस या प्रवेश संबंधी जानकारी नहीं है। क्या आप {current_inst} के विवरण जानना चाहेंगे?"
+                else:
+                    ext_resp = f"I am the admissions counselor for {current_inst}. I do not have fee or admission details for {external_inst}. Would you like details on {current_inst}'s programs?"
+
+                logger.info(
+                    f"[FAST_ROUTER] External institution detected ({external_inst}); returning grounded boundary response in {active_lang}",
+                    extra={"session_id": session.session_id}
+                )
+                return QueryComplexity.SIMPLE, ext_resp
+
+            # 1c. Handle Unoffered Programs Policy: Clear 1-sentence refusal + human counselor offer
             unoffered_match = cls.detect_unoffered_course(user_text)
             if unoffered_match:
                 course_name = unoffered_match
@@ -169,6 +227,17 @@ class FastQueryRouter:
 
             # 2. Normalize and check complexity
             normalized = SemanticQueryNormalizer.normalize(user_text)
+
+            # Context-dependent tracking: update or inherit active course
+            if normalized.courses_mentioned:
+                session.active_course = normalized.courses_mentioned[0]
+            elif session.active_course and normalized.intent in (
+                SemanticIntent.FEES_INQUIRY,
+                SemanticIntent.ELIGIBILITY_INQUIRY,
+                SemanticIntent.LIST_AVAILABLE_COURSES
+            ):
+                normalized.courses_mentioned.append(session.active_course)
+
             complexity = cls.classify_complexity(normalized, user_text)
 
             if complexity == QueryComplexity.COMPLEX or not rag_provider:
@@ -187,7 +256,7 @@ class FastQueryRouter:
                     return QueryComplexity.COMPLEX, None
 
                 primary_item: KnowledgeItem = res.items[0]
-                fast_response = cls._format_fast_answer(normalized, primary_item, active_lang)
+                fast_response = cls._format_fast_answer(normalized, primary_item, active_lang, session=session)
 
                 # Anti-repetition check: If the immediate previous assistant message was already this exact fast response,
                 # do not reuse it. Delegate to LLM for fresh contextual answer!
@@ -229,40 +298,81 @@ class FastQueryRouter:
         cls,
         normalized: NormalizedQuery,
         item: KnowledgeItem,
-        lang: str
+        lang: str,
+        session: Optional[SessionState] = None
     ) -> Optional[str]:
         """Generate a concise, natural, 1-2 sentence Indic/English response strictly from verified data."""
+        inst_name = (session.institution_name if session else "Apex University") or "Apex University"
+        org_id = (session.organization_id if session else "org_apex_univ") or "org_apex_univ"
+
+        # Multi-tenant isolation check: non-Apex tenants ground purely on retrieved item content
+        if org_id != "org_apex_univ":
+            return item.content
+
         intent = normalized.intent
         courses = normalized.courses_mentioned
+        fee_type = getattr(normalized, "fee_type", "general")
 
         if intent == SemanticIntent.FEES_INQUIRY:
+            # 1. Distinct Fee Type: Admission Fee (One-Time)
+            if fee_type == "admission":
+                if lang == "te-IN":
+                    return f"{inst_name} లో BTech one-time admission fee 25,000 rupees ఉంటుంది."
+                elif lang == "hi-IN":
+                    return f"{inst_name} में BTech की एकमुश्त (one-time) एडमिशन फीस 25,000 रुपये है।"
+                return f"At {inst_name}, the one-time BTech admission fee is INR 25,000."
+
+            # 2. Distinct Fee Type: Total Cost (4-year total)
+            if fee_type == "total":
+                if "CSE" in courses:
+                    if lang == "te-IN":
+                        return f"{inst_name} లో BTech CSE మొత్తం 4 సంవత్సరాల tuition fee 6,00,000 rupees అవుతుంది (సంవత్సరానికి 1,50,000)."
+                    elif lang == "hi-IN":
+                        return f"{inst_name} में BTech CSE की 4 साल की कुल ट्यूशन फीस 6,00,000 रुपये है (1,50,000 रुपये प्रति वर्ष)।"
+                    return f"At {inst_name}, the 4-year total tuition fee for BTech CSE is INR 6,00,000 (INR 1,50,000 per year)."
+
+                if "ECE" in courses:
+                    if lang == "te-IN":
+                        return f"{inst_name} లో BTech ECE మొత్తం 4 సంవత్సరాల tuition fee 4,80,000 rupees అవుతుంది (సంవత్సరానికి 1,20,000)."
+                    elif lang == "hi-IN":
+                        return f"{inst_name} में BTech ECE की 4 साल की कुल ट्यूशन फीस 4,80,000 रुपये है (1,20,000 रुपये प्रति वर्ष)।"
+                    return f"At {inst_name}, the 4-year total tuition fee for BTech ECE is INR 4,80,000 (INR 1,20,000 per year)."
+
+                # Both courses total
+                if lang == "te-IN":
+                    return f"{inst_name} లో 4 సంవత్సరాల మొత్తం tuition fee CSE కి 6,00,000 rupees మరియు ECE కి 4,80,000 rupees."
+                elif lang == "hi-IN":
+                    return f"{inst_name} में 4 साल की कुल ट्यूशन फीस CSE के लिए 6,00,000 रुपये और ECE के लिए 4,80,000 रुपये है।"
+                return f"At {inst_name}, the 4-year total tuition fee is INR 6,00,000 for CSE and INR 4,80,000 for ECE."
+
+            # 3. Distinct Fee Type: Annual Tuition / General Course Fee
             if "CSE" in courses or "csc" in normalized.raw_query.lower():
                 if lang == "te-IN":
-                    return "Apex University లో BTech CSE annual fee 1,50,000 rupees ఉంటుంది. ఇంకా ఏమైనా వివరాలు కావాలా?"
+                    return f"{inst_name} లో BTech CSE annual fee 1,50,000 rupees ఉంటుంది. ఇంకా ఏమైనా వివరాలు కావాలా?"
                 elif lang == "hi-IN":
-                    return "Apex University में BTech CSE की वार्षिक फीस 1,50,000 रुपये है। क्या आपको और जानकारी चाहिए?"
-                return "Apex University offers BTech CSE with an annual fee of INR 1,50,000. Would you like details on admissions?"
+                    return f"{inst_name} में BTech CSE की वार्षिक फीस 1,50,000 रुपये है। क्या आपको और जानकारी चाहिए?"
+                return f"{inst_name} offers BTech CSE with an annual fee of INR 1,50,000. Would you like details on admissions?"
 
             if "ECE" in courses:
                 if lang == "te-IN":
-                    return "Apex University లో BTech ECE annual fee 1,20,000 rupees ఉంటుంది. ఇంకేమైనా వివరాలు కావాలా?"
+                    return f"{inst_name} లో BTech ECE annual fee 1,20,000 rupees ఉంటుంది. ఇంకేమైనా వివరాలు కావాలా?"
                 elif lang == "hi-IN":
-                    return "Apex University में BTech ECE की वार्षिक फीस 1,20,000 रुपये है। क्या आपको और जानकारी चाहिए?"
-                return "Apex University offers BTech ECE with an annual fee of INR 1,20,000. How can I help you further?"
+                    return f"{inst_name} में BTech ECE की वार्षिक फीस 1,20,000 रुपये है। क्या आपको और जानकारी चाहिए?"
+                return f"{inst_name} offers BTech ECE with an annual fee of INR 1,20,000. How can I help you further?"
 
             # General fees
             if lang == "te-IN":
-                return "Apex University లో BTech CSE fee 1,50,000 rupees మరియు ECE fee 1,20,000 rupees per year."
+                return f"{inst_name} లో BTech CSE fee 1,50,000 rupees మరియు ECE fee 1,20,000 rupees per year."
             elif lang == "hi-IN":
-                return "Apex University में BTech CSE की फीस 1,50,000 रुपये और ECE की फीस 1,20,000 रुपये प्रति वर्ष है।"
-            return "At Apex University, BTech CSE annual fee is INR 1,50,000 and ECE is INR 1,20,000 per year."
+                return f"{inst_name} में BTech CSE की फीस 1,50,000 रुपये और ECE की फीस 1,20,000 रुपये प्रति वर्ष है।"
+            return f"At {inst_name}, BTech CSE annual fee is INR 1,50,000 and ECE is INR 1,20,000 per year."
 
         elif intent == SemanticIntent.LIST_AVAILABLE_COURSES:
             if lang == "te-IN":
-                return "మా Apex University లో BTech Computer Science (CSE) మరియు Electronics (ECE) courses అందుబాటులో ఉన్నాయి."
+                return f"మా {inst_name} లో BTech Computer Science (CSE) మరియు Electronics (ECE) courses అందుబాటులో ఉన్నాయి."
             elif lang == "hi-IN":
-                return "Apex University में BTech Computer Science (CSE) और Electronics (ECE) कोर्सेस उपलब्ध हैं।"
-            return "Apex University currently offers BTech Computer Science (CSE) and Electronics and Communication (ECE)."
+                return f"{inst_name} में BTech Computer Science (CSE) और Electronics (ECE) कोर्सेस उपलब्ध हैं।"
+            return f"{inst_name} currently offers BTech Computer Science (CSE) and Electronics and Communication (ECE)."
 
         elif intent == SemanticIntent.ELIGIBILITY_INQUIRY:
             if lang == "te-IN":
