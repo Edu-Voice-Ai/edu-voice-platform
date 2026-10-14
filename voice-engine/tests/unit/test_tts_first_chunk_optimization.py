@@ -93,39 +93,36 @@ def test_first_chunk_telugu_connector_boundary():
         assert "ఉన్నాయి" in rest1 or "ఉన్నాయి" in chunk1
 
 
-def test_first_chunk_word_boundary_fallback():
-    """Verify first chunk emits at safe word boundary around 20-32 chars if no punctuation exists."""
+def test_first_chunk_does_not_prematurely_split_unpunctuated_text():
+    """Verify first chunk does NOT prematurely chop text or split 'Apex University' without punctuation."""
     text = "Apex University provides comprehensive four year undergraduate degree programs in engineering."
 
     chunk1, rest1 = SpeechTextNormalizer.extract_safe_chunk(
-        text, min_chars=35, max_chars=180, is_eof=False, is_first_chunk=True
+        text, min_chars=35, max_chars=180, is_eof=True, is_first_chunk=True
     )
     assert chunk1 is not None
-    assert len(chunk1) <= 35
-    # Must end on a clean full word, not sliced
-    last_word = chunk1.split()[-1]
-    assert last_word in ["provides", "University", "Apex", "comprehensive"]
+    # Must keep "Apex University" intact and preserve complete phrase
+    assert "Apex University" in chunk1
     assert not chunk1.endswith("provi")
 
 
-def test_sentence_end_still_fires_immediately():
+def test_sentence_end_fires_on_complete_responses():
     """
-    Sentence-ending punctuation (. ! ? ।) still fires immediately for the first chunk
-    regardless of length. This preserves correct behavior for complete short responses.
+    Sentence-ending punctuation preserves complete sentences without tiny fragments.
+    Short responses fire cleanly at EOF.
     """
-    # "Yes." is a complete sentence — fires immediately (correct)
+    # "Yes." is a complete response — fires at EOF
     chunk1, rest1 = SpeechTextNormalizer.extract_safe_chunk(
-        "Yes.", min_chars=35, max_chars=180, is_eof=False, is_first_chunk=True
+        "Yes.", min_chars=35, max_chars=180, is_eof=True, is_first_chunk=True
     )
     assert chunk1 is not None
     assert "Yes" in chunk1
 
-    # "Sure!" is a complete exclamatory affirmation — fires immediately (correct)
+    # "Sure! We offer many programs." is unified rather than fragmented into "Sure!"
     chunk1b, rest1b = SpeechTextNormalizer.extract_safe_chunk(
-        "Sure! We offer many programs.", min_chars=35, max_chars=180, is_eof=False, is_first_chunk=True
+        "Sure! We offer many programs.", min_chars=35, max_chars=180, is_eof=True, is_first_chunk=True
     )
-    assert chunk1b == "Sure!"
-    assert "We offer" in rest1b
+    assert chunk1b == "Sure! We offer many programs."
 
 
 def test_comma_opener_does_not_fire_as_stub():

@@ -129,7 +129,7 @@ class SessionState:
             active_lang = self.preferred_language or self.language or "en-IN"
             return template.get_greeting(self, lang=active_lang)
         except Exception:
-            return f"Welcome to {self.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+            return f"Welcome to {self.institution_name}. How may I help you today?"
 
     def get_goodbye_text(self) -> str:
         """Resolve goodbye text using the active agent template or configuration."""
@@ -190,6 +190,8 @@ class SessionState:
     active_playback_generation_id: Optional[str] = None
     active_playback_turn_id: Optional[str] = None
     active_playback_language: Optional[str] = None
+    active_course: Optional[str] = None
+    is_synthesizing: bool = False
     is_bot_speaking: bool = False
     last_response_text: Optional[str] = None
     turn_count: int = 0
@@ -212,6 +214,8 @@ class SessionState:
     def log_cost_summary(self) -> str:
         """Format and return structured VOICE COST SUMMARY for call telemetry."""
         avg_chars = int(self.tts_chars_count / max(self.tts_requests_count, 1))
+        from app.tts.cache import TTSCacheManager
+        cache_stats = TTSCacheManager.get_stats()
         summary = (
             f"\n=============================\n"
             f"VOICE COST SUMMARY\n"
@@ -221,6 +225,9 @@ class SessionState:
             f"tts_chars={self.tts_chars_count}\n"
             f"tts_avg_chars={avg_chars}\n"
             f"tts_duplicates={self.tts_dedup_hits}\n"
+            f"tts_cache_hits={cache_stats['hits']}\n"
+            f"tts_cache_misses={cache_stats['misses']}\n"
+            f"tts_cache_hit_rate={cache_stats['hit_rate_pct']}%\n"
             f"tts_cancelled={self.tts_cancelled_count}\n"
             f"tts_not_played={self.tts_not_played_count}\n"
             f"tts_retries={self.tts_retries_count}\n"
@@ -254,6 +261,8 @@ class SessionState:
 
     def mark_playback_finished(self, force: bool = False):
         """Clear greeting/TTS playback flags when physical playout is done (or forced after telephony pacing)."""
+        if self.is_synthesizing and not self.is_generation_cancelled(self.active_playback_generation_id):
+            return
         now_ms = time.time() * 1000
         existing_task = getattr(self, "_delayed_finish_task", None)
         if force or now_ms >= float(self.playback_estimated_end_time_ms or 0.0):

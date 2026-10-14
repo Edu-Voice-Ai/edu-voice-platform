@@ -230,12 +230,22 @@ class SarvamSTTProvider(STTProvider):
 class SarvamStreamingSTTSession:
     """
     Manages an asynchronous, non-blocking real-time streaming WebSocket connection to Sarvam Saaras v3 realtime STT.
-    Audio ingestion via push_audio() is completely decoupled from network I/O via a bounded in-memory queue.
+    Uses manual endpointing (endpointing=manual) — the local Silero VAD is the turn authority.
+
+    Verified protocol (live EC2 test 2026-10-03, all 9 gates PASS):
+      URL params:  model=saaras:v3-realtime, language_code=auto|<lang>, mode=transcribe,
+                   stream_type=fast, endpointing=manual
+      Per-turn sequence:
+        speech onset  →  {"event":"speech_start"}
+        per-frame     →  {"event":"audio_input","audio":"<base64>"}
+        speech end    →  {"event":"speech_end"}  then  {"event":"flush"}
+        await server  →  transcript.partial* then transcript.final
+      Fallback: REST batch STT on WS failure / timeout / degraded stream.
     """
 
     def __init__(
         self,
-        provider: SarvamSTTProvider,
+        provider: "SarvamSTTProvider",
         api_key: Optional[str] = None,
         base_url: str = "https://api.sarvam.ai",
         language_code: Optional[str] = None,
@@ -250,23 +260,34 @@ class SarvamStreamingSTTSession:
         self._ws = None
         self._sender_task: Optional[asyncio.Task] = None
         self._receiver_task: Optional[asyncio.Task] = None
-        
+
         # Audio queues: Bounded queue (max 50 frames = 1.0s) for streaming WebSocket
         self._audio_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=50)
         self._turn_audio_buffer: bytearray = bytearray()
-        
+
         # Turn tracking and state isolation
         self._current_turn_id: Optional[str] = None
         self._interim_transcript: str = ""
         self._final_transcript: str = ""
         self._final_language: str = "en-IN"
         self._final_event: asyncio.Event = asyncio.Event()
-        
+
+        # Manual endpointing: track whether speech_start has been sent for current turn
+        self._speech_started_sent: bool = False
+
         # Health & State Flags
         self._is_connected: bool = False
         self._is_degraded: bool = False
         self._connecting_lock: asyncio.Lock = asyncio.Lock()
         self._closed: bool = False
+
+        # Latency telemetry (ms, populated per turn)
+        self._t_connect_ms: float = 0.0
+        self._t_first_partial_ms: float = 0.0
+        self._t_final_ms: float = 0.0
+        self._realtime_success_count: int = 0
+        self._realtime_failure_count: int = 0
+        self._rest_fallback_count: int = 0
 
         # Start background sender worker immediately
         self._sender_task = asyncio.create_task(self._sender_loop())
@@ -279,10 +300,42 @@ class SarvamStreamingSTTSession:
     def is_stream_healthy(self) -> bool:
         return self._is_connected and not self._is_degraded and (self._ws is not None)
 
+    @property
+    def telemetry(self) -> dict:
+        """Return per-session latency telemetry counters for the physical-call benchmark."""
+        return {
+            "stt_ws_connect_ms": round(self._t_connect_ms, 1),
+            "stt_first_partial_ms": round(self._t_first_partial_ms, 1),
+            "stt_final_ms": round(self._t_final_ms, 1),
+            "realtime_success_count": self._realtime_success_count,
+            "realtime_failure_count": self._realtime_failure_count,
+            "rest_fallback_count": self._rest_fallback_count,
+        }
+
     def _get_ws_url(self) -> str:
+        """
+        Build Sarvam realtime STT WebSocket URL with manual endpointing.
+
+        endpointing=manual eliminates Sarvam's internal VAD cutoff (which caused ~1445ms P50).
+        The local Silero VAD is the authoritative turn authority; we signal speech_end + flush
+        ourselves, achieving the benchmarked ~335ms P50 path.
+
+        language_code=auto on first turn (before session language lock);
+        pinned (en-IN/te-IN/hi-IN) after language is established.
+        """
         ws_base = self.base_url.replace("https://", "wss://").replace("http://", "ws://")
-        stt_lang = self.language_code if self.language_code in ("en-IN", "hi-IN", "te-IN") else "unknown"
-        return f"{ws_base}/speech-to-text-realtime/ws?model={self.model}&language_code={stt_lang}&mode=transcribe&stream_type=fast"
+        if self.language_code in ("en-IN", "hi-IN", "te-IN"):
+            stt_lang = self.language_code
+        else:
+            stt_lang = "auto"
+        return (
+            f"{ws_base}/speech-to-text-realtime/ws"
+            f"?model={self.model}"
+            f"&language_code={stt_lang}"
+            f"&mode=transcribe"
+            f"&stream_type=fast"
+            f"&endpointing=manual"
+        )
 
     async def _ensure_connected(self) -> bool:
         """Connect/Reconnect to Sarvam realtime WebSocket. Executed exclusively inside _sender_loop."""
@@ -305,6 +358,7 @@ class SarvamStreamingSTTSession:
                         pass
                     self._ws = None
 
+                t_connect_start = asyncio.get_event_loop().time()
                 self._ws = await websockets.connect(
                     ws_url,
                     additional_headers=headers,
@@ -313,11 +367,17 @@ class SarvamStreamingSTTSession:
                     ping_timeout=20.0,
                     close_timeout=5.0
                 )
+                self._t_connect_ms = (asyncio.get_event_loop().time() - t_connect_start) * 1000
                 self._is_connected = True
                 self._is_degraded = False
+                self._speech_started_sent = False
                 if self._receiver_task is None or self._receiver_task.done():
                     self._receiver_task = asyncio.create_task(self._receiver_loop())
-                logger.info(f"[STT_STREAM] Connected to Sarvam realtime WebSocket ({self.model})")
+                logger.info(
+                    f"[STT_STREAM] Connected to Sarvam realtime WebSocket ({self.model}, "
+                    f"endpointing=manual, lang={self.language_code or 'auto'}) "
+                    f"connect_ms={self._t_connect_ms:.1f}"
+                )
                 return True
             except Exception as e:
                 logger.debug(f"[STT_STREAM] WebSocket connect notice ({type(e).__name__}): {e}")
@@ -326,7 +386,14 @@ class SarvamStreamingSTTSession:
                 return False
 
     async def _sender_loop(self):
-        """Dedicated background task for reading bounded audio queue and streaming to WebSocket."""
+        """
+        Dedicated background task: reads from bounded audio queue and streams to WebSocket.
+
+        Manual endpointing protocol per turn:
+          1. Before first audio chunk → send {"event":"speech_start"}
+          2. Per chunk               → send {"event":"audio_input","audio":"<base64>"}
+          (speech_end + flush are sent explicitly in finalize())
+        """
         import base64
         import json
         while not self._closed:
@@ -340,6 +407,19 @@ class SarvamStreamingSTTSession:
 
                 connected = await self._ensure_connected()
                 if connected and self._ws and self._is_connected:
+                    # Send speech_start before the very first audio chunk of each turn
+                    if not self._speech_started_sent:
+                        try:
+                            await self._ws.send(json.dumps({"event": "speech_start"}))
+                            self._speech_started_sent = True
+                            logger.debug("[STT_STREAM] Sent speech_start (manual endpointing)")
+                        except Exception as e:
+                            logger.debug(f"[STT_STREAM] speech_start send error: {e}")
+                            self._is_connected = False
+                            self._is_degraded = True
+                            continue
+
+                    # Stream audio frame as audio_input event
                     b64_audio = base64.b64encode(chunk).decode("ascii")
                     payload = json.dumps({"event": "audio_input", "audio": b64_audio})
                     await self._ws.send(payload)
@@ -353,11 +433,16 @@ class SarvamStreamingSTTSession:
                 self._is_degraded = True
 
     async def _receiver_loop(self):
-        """Asynchronously listen for interim and final transcripts from Sarvam."""
+        """
+        Asynchronously receive transcript.partial and transcript.final from Sarvam.
+        For manual endpointing, transcript.final arrives after speech_end + flush.
+        """
         import json
+        t_session_start = asyncio.get_event_loop().time()
         try:
             while self._is_connected and self._ws and not self._closed:
                 msg_raw = await self._ws.recv()
+                t_now = asyncio.get_event_loop().time()
                 if isinstance(msg_raw, bytes):
                     msg_str = msg_raw.decode("utf-8", errors="ignore")
                 else:
@@ -370,36 +455,57 @@ class SarvamStreamingSTTSession:
 
                 event = data.get("event") or data.get("type", "")
                 text = (data.get("transcript") or data.get("text") or "").strip()
-                detected_lang = data.get("language_code", self.language_code or "en-IN")
+                detected_lang = data.get("language_code", self.language_code or "en-IN") or "en-IN"
+
                 is_final = bool(
                     data.get("is_final") is True
                     or str(data.get("is_final", "")).lower() == "true"
                     or event in ("transcript.final", "final", "speech.end")
                 )
 
+                is_partial = bool(
+                    event in ("transcript.partial", "partial", "speech.interim")
+                    or (not is_final and text and event not in ("session.begin", "error"))
+                )
+
+                if is_partial and text:
+                    elapsed_ms = (t_now - t_session_start) * 1000
+                    if self._t_first_partial_ms == 0.0:
+                        self._t_first_partial_ms = elapsed_ms
+                        logger.debug(f"[STT_STREAM] transcript.partial t={elapsed_ms:.0f}ms: '{text[:60]}'")
+                    self._interim_transcript = text
+
                 if is_final and text:
+                    elapsed_ms = (t_now - t_session_start) * 1000
+                    self._t_final_ms = elapsed_ms
                     self._final_transcript = text
                     self._final_language = detected_lang
                     self._final_event.set()
-                elif text:
-                    self._interim_transcript = text
+                    logger.info(
+                        f"[STT_STREAM] transcript.final t={elapsed_ms:.0f}ms "
+                        f"lang={detected_lang}: '{text[:80]}'"
+                    )
+                elif is_final:
+                    # Final event with empty text — unblock finalize() to avoid hanging
+                    self._final_event.set()
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.debug(f"[STT_STREAM] Receiver loop notice: {e}")
         finally:
             self._is_connected = False
-            self._final_event.set()
+            self._final_event.set()  # Always unblock finalize() on disconnect
 
     async def push_audio(self, pcm_chunk: bytes) -> None:
         """
-        Non-blocking entry point for audio frames.
+        Non-blocking entry point for audio frames during speech.
         Guarantees immediate return (<0.05ms) with ZERO network or lock waiting.
         """
         if not pcm_chunk:
             return
 
-        # 1. Always append to complete turn buffer (ground truth fallback)
+        # 1. Always append to complete turn buffer (ground truth for REST fallback)
         self._turn_audio_buffer.extend(pcm_chunk)
 
         # 2. Enqueue into bounded streaming queue without blocking
@@ -408,68 +514,130 @@ class SarvamStreamingSTTSession:
         except asyncio.QueueFull:
             if not self._is_degraded:
                 self._is_degraded = True
-                logger.debug("[STT_STREAM] Audio queue overflow (maxsize=50); marking stream degraded for batch fallback")
+                logger.debug("[STT_STREAM] Audio queue overflow (maxsize=50); marking stream degraded for REST fallback")
 
     async def finalize(
         self,
         language_code: Optional[str] = None,
         audio_bytes: Optional[bytes] = None,
         turn_id: Optional[str] = None
-    ) -> STTResult:
-        """Signal turn endpoint and await final resolved transcription with sub-250ms latency."""
+    ) -> "STTResult":
+        """
+        Signal manual turn endpoint and await final resolved transcription.
+
+        Manual endpointing sequence (verified live 2026-10-03, all 9 gates PASS):
+          1. Drain remaining queued audio (allow sender_loop to flush)
+          2. Send {"event":"speech_end"}  — signals caller stopped speaking
+          3. Send {"event":"flush"}       — requests Sarvam to emit transcript.final
+          4. Wait up to 2.5s for transcript.final
+          5. Use interim transcript if final is empty
+          6. Fall back to REST batch STT if nothing arrived within watchdog
+
+        DO NOT send transcript.partial to LLM — only transcript.final is authoritative.
+        """
         import json
         t0 = asyncio.get_event_loop().time()
         lang = language_code or self.language_code
         raw_audio = audio_bytes if (audio_bytes is not None and len(audio_bytes) > 0) else bytes(self._turn_audio_buffer)
 
         def _safe_reset():
-            # Only reset if the current session turn is still this turn or unassigned,
-            # avoiding wiping subsequent turn buffers that began accumulating audio concurrently.
             if self._current_turn_id == turn_id or self._current_turn_id is None:
                 self.reset_turn(turn_id)
 
-        # Fast Fail-Fast: If stream is known unhealthy or degraded, do NOT wait for timeout!
+        # Fast fail-fast: If stream is known unhealthy or degraded, skip to REST immediately
         if not self.is_stream_healthy:
-            logger.info("[STT_STREAM] Stream unhealthy/disconnected; executing immediate batch REST fallback (0ms wait)")
+            logger.info("[STT_STREAM] Stream unhealthy/degraded; executing immediate REST fallback (0ms wait)")
+            self._rest_fallback_count += 1
             _safe_reset()
             return await self.provider.transcribe_audio(raw_audio, sample_rate=16000, language_code=lang)
 
-        # Attempt low-latency realtime finalization if WebSocket is healthy
+        # Drain remaining queued audio before signalling end-of-turn (max 150ms)
+        drain_deadline = asyncio.get_event_loop().time() + 0.15
+        while not self._audio_queue.empty() and asyncio.get_event_loop().time() < drain_deadline:
+            await asyncio.sleep(0.005)
+
+        # Send speech_end then flush to trigger manual endpointing
         try:
-            flush_payload = json.dumps({"event": "flush"})
-            await asyncio.wait_for(self._ws.send(flush_payload), timeout=0.15)
+            await asyncio.wait_for(
+                self._ws.send(json.dumps({"event": "speech_end"})),
+                timeout=0.15
+            )
+            logger.debug("[STT_STREAM] Sent speech_end (manual endpointing)")
 
-            # Wait up to 200ms for the final transcript over WebSocket
-            try:
-                await asyncio.wait_for(self._final_event.wait(), timeout=0.200)
-                elapsed_ms = (asyncio.get_event_loop().time() - t0) * 1000
-                transcript = (self._final_transcript or self._interim_transcript).strip()
-                if transcript:
-                    logger.info(
-                        f"[STT] Success (realtime streaming latency={elapsed_ms:.1f}ms): \"{transcript}\" (detected: {self._final_language})",
-                        extra={"lang": self._final_language}
-                    )
-                    result = STTResult(text=transcript, language_code=self._final_language, confidence=0.95)
-                    _safe_reset()
-                    return result
-            except asyncio.TimeoutError:
-                interim = (self._interim_transcript or "").strip()
-                if interim:
-                    elapsed_ms = (asyncio.get_event_loop().time() - t0) * 1000
-                    logger.info(
-                        f"[STT] Using interim transcript after flush timeout "
-                        f"(realtime streaming latency={elapsed_ms:.1f}ms): \"{interim}\" "
-                        f"(detected: {self._final_language})",
-                        extra={"lang": self._final_language}
-                    )
-                    result = STTResult(text=interim, language_code=self._final_language, confidence=0.85)
-                    _safe_reset()
-                    return result
-                logger.debug("[STT_STREAM] Realtime finalization timed out (250ms); falling back to batch REST")
+            await asyncio.wait_for(
+                self._ws.send(json.dumps({"event": "flush"})),
+                timeout=0.15
+            )
+            logger.debug("[STT_STREAM] Sent flush (manual endpointing)")
+
         except Exception as ex:
-            logger.debug(f"[STT_STREAM] Realtime finalization notice ({ex}); falling back to batch REST")
+            logger.debug(f"[STT_STREAM] speech_end/flush send error ({ex}); falling back to REST")
+            self._realtime_failure_count += 1
+            self._rest_fallback_count += 1
+            _safe_reset()
+            return await self.provider.transcribe_audio(raw_audio, sample_rate=16000, language_code=lang)
 
-        # Fallback path: standard batch REST transcribe_audio with ground truth turn buffer
+        # Wait for transcript.final (generous window relative to benchmark flush→final ~335ms P50)
+        FINAL_WAIT_S = 2.5
+        try:
+            await asyncio.wait_for(self._final_event.wait(), timeout=FINAL_WAIT_S)
+            elapsed_ms = (asyncio.get_event_loop().time() - t0) * 1000
+            transcript = self._final_transcript.strip()
+            if transcript:
+                detected_lang = self._final_language or lang or "en-IN"
+                logger.info(
+                    f"[STT] Success (realtime manual endpointing latency={elapsed_ms:.1f}ms): "
+                    f"'{transcript}' (detected: {detected_lang})",
+                    extra={"lang": detected_lang}
+                )
+                self._realtime_success_count += 1
+                result = STTResult(text=transcript, language_code=detected_lang, confidence=0.95)
+                _safe_reset()
+                return result
+
+            # Final event fired but transcript empty — try interim
+            interim = self._interim_transcript.strip()
+            if interim:
+                elapsed_ms = (asyncio.get_event_loop().time() - t0) * 1000
+                detected_lang = self._final_language or lang or "en-IN"
+                logger.info(
+                    f"[STT] Using interim after empty final "
+                    f"(realtime manual endpointing latency={elapsed_ms:.1f}ms): "
+                    f"'{interim}' (detected: {detected_lang})",
+                    extra={"lang": detected_lang}
+                )
+                self._realtime_success_count += 1
+                result = STTResult(text=interim, language_code=detected_lang, confidence=0.85)
+                _safe_reset()
+                return result
+
+        except asyncio.TimeoutError:
+            elapsed_ms = (asyncio.get_event_loop().time() - t0) * 1000
+            interim = self._interim_transcript.strip()
+            if interim:
+                detected_lang = self._final_language or lang or "en-IN"
+                logger.info(
+                    f"[STT] Using interim after {FINAL_WAIT_S}s timeout "
+                    f"(manual endpointing latency={elapsed_ms:.1f}ms): "
+                    f"'{interim}' (detected: {detected_lang})",
+                    extra={"lang": detected_lang}
+                )
+                self._realtime_success_count += 1
+                result = STTResult(text=interim, language_code=detected_lang, confidence=0.85)
+                _safe_reset()
+                return result
+            logger.info(
+                f"[STT_STREAM] transcript.final not received within {FINAL_WAIT_S}s "
+                f"(elapsed={elapsed_ms:.0f}ms); falling back to REST"
+            )
+
+        except Exception as ex:
+            logger.debug(f"[STT_STREAM] finalize wait error ({ex}); falling back to REST")
+
+        # REST fallback
+        self._realtime_failure_count += 1
+        self._rest_fallback_count += 1
+        logger.info(f"[STT_STREAM] REST fallback triggered (turn={turn_id})")
         _safe_reset()
         return await self.provider.transcribe_audio(raw_audio, sample_rate=16000, language_code=lang)
 
@@ -480,6 +648,9 @@ class SarvamStreamingSTTSession:
         self._final_transcript = ""
         self._final_event.clear()
         self._current_turn_id = turn_id
+        self._speech_started_sent = False
+        self._t_first_partial_ms = 0.0
+        self._t_final_ms = 0.0
         # Drain any leftover audio in streaming queue
         while not self._audio_queue.empty():
             try:
@@ -506,4 +677,9 @@ class SarvamStreamingSTTSession:
             except Exception:
                 pass
             self._ws = None
-
+        logger.info(
+            f"[STT_STREAM] Session closed — "
+            f"realtime_success={self._realtime_success_count} "
+            f"realtime_failure={self._realtime_failure_count} "
+            f"rest_fallback={self._rest_fallback_count}"
+        )

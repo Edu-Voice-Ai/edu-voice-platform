@@ -197,10 +197,14 @@ class SpeechToSpeechEngine:
         self.queues = queues or PipelineQueueBundle()
         self.latency_tracker = latency_tracker or MetricsCollector.get_tracker()
 
+        calc_normal_silence = max(600, int(min_silence_duration_ms)) if min_silence_duration_ms in (300, 350) else int(min_silence_duration_ms)
         self.turn_manager = TurnManager(
             session=self.session,
             queues=self.queues,
             min_silence_duration_ms=min_silence_duration_ms,
+            normal_silence_ms=calc_normal_silence,
+            short_utterance_silence_ms=int(min_silence_duration_ms),
+            language_selection_silence_ms=int(min_silence_duration_ms),
             structured_input_silence_ms=structured_input_silence_ms,
             min_speech_duration_ms=min_speech_duration_ms,
             min_barge_in_duration_ms=min_barge_in_duration_ms,
@@ -305,7 +309,7 @@ class SpeechToSpeechEngine:
             greeting_text = (
                 self.session.get_greeting_text()
                 if hasattr(self.session, "get_greeting_text")
-                else f"Welcome to {self.session.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+                else f"Welcome to {self.session.institution_name}. How may I help you today?"
             )
             global _GREETING_AUDIO_CACHE
             greeting_speaker = getattr(self.tts_provider, "voice_id", None) or getattr(self.tts_provider, "default_speaker", "pooja")
@@ -364,7 +368,7 @@ class SpeechToSpeechEngine:
         greeting_text = (
             self.session.get_greeting_text()
             if hasattr(self.session, "get_greeting_text")
-            else f"Welcome to {self.session.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+            else f"Welcome to {self.session.institution_name}. How may I help you today?"
         )
         logger.info(
             f"[INTERACTION_TRACE] session_id={self.session.session_id} event=GREETING_START text=\"{greeting_text}\"",
@@ -442,16 +446,16 @@ class SpeechToSpeechEngine:
                 ))
 
             if not token.is_cancelled and self.session.is_greeting_playing and not self.session.is_generation_cancelled(turn.generation_id):
-                final_frame = chunker.flush()
-                if final_frame:
-                    b64_audio = AudioCodec.frame_to_base64(final_frame)
-                    self._emit_event(SessionEvent(
-                        event=EventType.AUDIO_OUTPUT,
-                        session_id=self.session.session_id,
-                        turn_id=turn.turn_id,
-                        generation_id=turn.generation_id,
-                        data={"data": b64_audio, "seq": final_frame.seq, "sample_rate": final_frame.sample_rate}
-                    ))
+                for final_frame in chunker.flush_frames():
+                    if final_frame:
+                        b64_audio = AudioCodec.frame_to_base64(final_frame)
+                        self._emit_event(SessionEvent(
+                            event=EventType.AUDIO_OUTPUT,
+                            session_id=self.session.session_id,
+                            turn_id=turn.turn_id,
+                            generation_id=turn.generation_id,
+                            data={"data": b64_audio, "seq": final_frame.seq, "sample_rate": final_frame.sample_rate}
+                        ))
 
                 self.session.append_message(role="assistant", content=greeting_text)
                 total_duration_ms = (time.time() * 1000) - gen_start_ms
@@ -563,7 +567,7 @@ class SpeechToSpeechEngine:
             if cur_turn:
                 if cur_turn.state == TurnStateEnum.SPEAKING:
                     est_end = float(getattr(self.session, "playback_estimated_end_time_ms", 0.0) or 0.0)
-                    if est_end > 0 and now_ms >= est_end:
+                    if est_end > 0 and now_ms >= est_end and not getattr(self.session, "is_synthesizing", False):
                         self.session.mark_playback_finished(force=True)
                 elif cur_turn.state == TurnStateEnum.PROCESSING:
                     # Use processing_started_at_ms (set when STT ends) rather than start_time_ms
@@ -1681,29 +1685,29 @@ class SpeechToSpeechEngine:
                             }
                         ))
 
-                final_frame = chunker.flush()
-                if final_frame and not (token and token.is_cancelled) and not self.session.is_generation_cancelled(item_gen_id):
-                    self.session.extend_playback_deadline(20.0)
-                    self._outbound_ref_buffer.append(final_frame.to_numpy_float32())
-                    try:
-                        self.queues.audio_out_queue.put_nowait(final_frame)
-                    except asyncio.QueueFull:
-                        pass
-                    b64_audio = AudioCodec.frame_to_base64(final_frame)
-                    self._emit_event(SessionEvent(
-                        event=EventType.AUDIO_OUTPUT,
-                        session_id=self.session.session_id,
-                        turn_id=item_turn_id,
-                        generation_id=item_gen_id,
-                        data={
-                            "data": b64_audio,
-                            "seq": final_frame.seq,
-                            "sample_rate": final_frame.sample_rate,
-                            "duration_ms": final_frame.duration_ms,
-                            "language": playback_lang,
-                            "cancellation_cycle": getattr(self.session, "cancellation_cycle_id", 0)
-                        }
-                    ))
+                for final_frame in chunker.flush_frames():
+                    if final_frame and not (token and token.is_cancelled) and not self.session.is_generation_cancelled(item_gen_id):
+                        self.session.extend_playback_deadline(final_frame.duration_ms)
+                        self._outbound_ref_buffer.append(final_frame.to_numpy_float32())
+                        try:
+                            self.queues.audio_out_queue.put_nowait(final_frame)
+                        except asyncio.QueueFull:
+                            pass
+                        b64_audio = AudioCodec.frame_to_base64(final_frame)
+                        self._emit_event(SessionEvent(
+                            event=EventType.AUDIO_OUTPUT,
+                            session_id=self.session.session_id,
+                            turn_id=item_turn_id,
+                            generation_id=item_gen_id,
+                            data={
+                                "data": b64_audio,
+                                "seq": final_frame.seq,
+                                "sample_rate": final_frame.sample_rate,
+                                "duration_ms": final_frame.duration_ms,
+                                "language": playback_lang,
+                                "cancellation_cycle": getattr(self.session, "cancellation_cycle_id", 0)
+                            }
+                        ))
 
                 # Drain the __EOF__ sentinel from tts_in_queue for this generation
                 try:
@@ -1779,6 +1783,7 @@ class SpeechToSpeechEngine:
                         break
 
             try:
+                self.session.is_synthesizing = True
                 first_audio = True
                 if hasattr(self.session, "arm_playback_interrupt"):
                     self.session.arm_playback_interrupt()
@@ -1791,10 +1796,14 @@ class SpeechToSpeechEngine:
                         if (
                             (token and token.is_cancelled)
                             or self.session.is_generation_cancelled(item_gen_id)
-                            or item_gen_id != self.session.active_playback_generation_id
+                            or (self.session.active_playback_generation_id is not None and item_gen_id != self.session.active_playback_generation_id)
                         ):
                             logger.info(f"[TTS] Generation cancelled during audio streaming gen={item_gen_id}", extra={"session_id": self.session.session_id})
                             break
+
+                        if self.session.active_playback_generation_id is None and not self.session.is_generation_cancelled(item_gen_id):
+                            self.session.active_playback_generation_id = item_gen_id
+                            self.session.is_bot_speaking = True
 
                         frame = audio_chunk.frame
                         if first_audio:
@@ -1905,6 +1914,9 @@ class SpeechToSpeechEngine:
             except Exception as e:
                 logger.error(f"TTS synthesis failed: {e}", extra={"session_id": self.session.session_id})
                 self.session.mark_playback_finished(force=True)
+
+            finally:
+                self.session.is_synthesizing = False
 
     async def handle_handoff_acknowledged(self, status: str = "resolving_target", hold_media: bool = True):
         """Called when Gateway emits handoff.acknowledged."""
