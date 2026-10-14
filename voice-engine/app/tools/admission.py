@@ -25,10 +25,17 @@ class GetCoursesTool(BaseTool):
         }
 
     async def execute(self, organization_id: str, agent_id: str, degree_level: str = "all", **kwargs) -> ToolExecutionResult:
-        courses = [
-            {"code": "BTECH-CSE", "name": "B.Tech Computer Science and Engineering", "duration": "4 Years", "seats": 180},
-            {"code": "BTECH-ECE", "name": "B.Tech Electronics and Communication Engineering", "duration": "4 Years", "seats": 120}
-        ]
+        if degree_level in ("intermediate", "inter", "junior_college", "cec"):
+            courses = [
+                {"code": "INTER-CEC", "name": "Intermediate CEC (Civics, Economics, Commerce)", "duration": "2 Years", "seats": 120},
+                {"code": "INTER-MEC", "name": "Intermediate MEC (Mathematics, Economics, Commerce)", "duration": "2 Years", "seats": 120},
+                {"code": "INTER-MPC", "name": "Intermediate MPC (Mathematics, Physics, Chemistry)", "duration": "2 Years", "seats": 180}
+            ]
+        else:
+            courses = [
+                {"code": "BTECH-CSE", "name": "B.Tech Computer Science and Engineering", "duration": "4 Years", "seats": 180},
+                {"code": "BTECH-ECE", "name": "B.Tech Electronics and Communication Engineering", "duration": "4 Years", "seats": 120}
+            ]
         return ToolExecutionResult(tool_name=self.name, success=True, data={"organization_id": organization_id, "courses": courses})
 
 
@@ -46,7 +53,7 @@ class GetFeeTool(BaseTool):
         return {
             "type": "object",
             "properties": {
-                "course_name": {"type": "string", "description": "Name or code of the course (e.g. CSE, ECE, BTech)"}
+                "course_name": {"type": "string", "description": "Name or code of the course (e.g. CSE, ECE, BTech, CEC)"}
             },
             "required": ["course_name"]
         }
@@ -57,6 +64,12 @@ class GetFeeTool(BaseTool):
             fee_info = {"course": "B.Tech Computer Science and Engineering", "tuition_fee_annual_inr": 150000, "admission_fee_one_time_inr": 25000, "currency": "INR"}
         elif "ece" in c_lower or "electronics" in c_lower:
             fee_info = {"course": "B.Tech Electronics and Communication", "tuition_fee_annual_inr": 120000, "admission_fee_one_time_inr": 25000, "currency": "INR"}
+        elif "cec" in c_lower or "civics" in c_lower or "commerce" in c_lower:
+            fee_info = {"course": "Intermediate CEC (Civics, Economics, Commerce)", "tuition_fee_annual_inr": 45000, "admission_fee_one_time_inr": 10000, "currency": "INR"}
+        elif "mec" in c_lower:
+            fee_info = {"course": "Intermediate MEC (Mathematics, Economics, Commerce)", "tuition_fee_annual_inr": 50000, "admission_fee_one_time_inr": 10000, "currency": "INR"}
+        elif "mpc" in c_lower:
+            fee_info = {"course": "Intermediate MPC (Mathematics, Physics, Chemistry)", "tuition_fee_annual_inr": 55000, "admission_fee_one_time_inr": 10000, "currency": "INR"}
         else:
             fee_info = {"course": course_name, "tuition_fee_annual_inr": 100000, "admission_fee_one_time_inr": 20000, "currency": "INR"}
         
@@ -83,7 +96,11 @@ class GetEligibilityTool(BaseTool):
         }
 
     async def execute(self, organization_id: str, agent_id: str, course_name: str = "", **kwargs) -> ToolExecutionResult:
-        criteria = "Minimum 60% aggregate in Class 12 / Intermediate with Mathematics, Physics, and Chemistry. Valid score in State EAPCET / JEE Main."
+        c_lower = course_name.lower()
+        if "cec" in c_lower or "mec" in c_lower or "commerce" in c_lower:
+            criteria = "Minimum 50% aggregate in 10th Standard (SSC) from any recognized state or central board."
+        else:
+            criteria = "Minimum 60% aggregate in Class 12 / Intermediate with Mathematics, Physics, and Chemistry. Valid score in State EAPCET / JEE Main."
         return ToolExecutionResult(tool_name=self.name, success=True, data={"course": course_name, "eligibility": criteria})
 
 

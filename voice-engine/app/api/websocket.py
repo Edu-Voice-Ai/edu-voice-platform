@@ -71,9 +71,27 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
         llm = MockLLMProvider()
 
     # TTS (Supports Sarvam primary, ElevenLabs fallback, and Mock configurable via TTS_PROVIDER)
+    session_voice_id = getattr(session, "voice_id", None)
+    if isinstance(session_voice_id, str):
+        session_voice_id = session_voice_id.strip() or None
+
+    session_speech_cfg = getattr(session, "speech_config", None) or {}
+    speech_cfg_voice = session_speech_cfg.get("voice_id") if isinstance(session_speech_cfg, dict) else None
+    if isinstance(speech_cfg_voice, str):
+        speech_cfg_voice = speech_cfg_voice.strip() or None
+
+    settings_voice_id = getattr(settings, "voice_id", None)
+    if isinstance(settings_voice_id, str):
+        settings_voice_id = settings_voice_id.strip() or None
+
+    effective_voice_id = session_voice_id or speech_cfg_voice or settings_voice_id
+
     tts_prov = getattr(settings, "tts_provider", "sarvam").lower()
     if tts_prov == "elevenlabs" and settings.elevenlabs_api_key:
-        tts = ElevenLabsTTSProvider(api_key=settings.elevenlabs_api_key)
+        tts = ElevenLabsTTSProvider(
+            api_key=settings.elevenlabs_api_key,
+            **({"voice_id": effective_voice_id} if effective_voice_id else {})
+        )
     elif tts_prov == "mock":
         tts = MockTTSProvider(sample_rate=settings.sample_rate)
     elif settings.sarvam_api_key:
@@ -81,11 +99,15 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
             api_key=settings.sarvam_api_key,
             model=settings.tts_model,
             default_speaker=settings.tts_speaker,
+            voice_id=effective_voice_id,
             min_chars=settings.tts_min_chars,
             max_chars=settings.tts_max_chars
         )
     elif settings.elevenlabs_api_key:
-        tts = ElevenLabsTTSProvider(api_key=settings.elevenlabs_api_key)
+        tts = ElevenLabsTTSProvider(
+            api_key=settings.elevenlabs_api_key,
+            **({"voice_id": effective_voice_id} if effective_voice_id else {})
+        )
     else:
         tts = MockTTSProvider(sample_rate=settings.sample_rate)
 
@@ -102,7 +124,7 @@ def build_default_engine(session: SessionState) -> SpeechToSpeechEngine:
     conv_manager = ConversationManager(rag_provider=rag, tool_registry=registry)
 
     speech_cfg = getattr(session, "speech_config", None) or {}
-    vad_silence = speech_cfg.get("vad_silence_threshold_ms") or settings.normal_silence_ms
+    vad_silence = speech_cfg.get("vad_silence_threshold_ms") or settings.effective_conversational_silence_ms
 
     return SpeechToSpeechEngine(
         session=session,
@@ -124,6 +146,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
     """Realtime full-duplex WebSocket connection for local microphone/audio streaming."""
     await websocket.accept()
     manager = get_session_manager()
+    settings = get_settings()
     session: Optional[SessionState] = None
     engine: Optional[SpeechToSpeechEngine] = None
     writer_task: Optional[asyncio.Task] = None
@@ -225,13 +248,27 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                     sr = int(payload.get("client_sample_rate", 16000))
                     template_type = payload.get("template_type") or payload.get("template", "education")
                     biz_name = payload.get("business_name") or payload.get("institution_name", "Apex University")
-                    agent_name = payload.get("agent_name")
+                    agent_name = payload.get("agent_name") or getattr(settings, "agent_name", "Karthik")
                     greeting_msg = payload.get("greeting_message") or speech_cfg.get("welcome_message") or payload.get("welcome_message")
                     goodbye_msg = payload.get("goodbye_message") or speech_cfg.get("goodbye_message") or payload.get("goodbye_message")
                     sys_prompt = payload.get("system_prompt")
 
                     allow_barge_in = payload.get("allow_barge_in", speech_cfg.get("allow_barge_in", True))
                     max_call_duration_seconds = payload.get("max_call_duration_seconds", speech_cfg.get("max_call_duration_seconds"))
+
+                    payload_voice_id = payload.get("voice_id")
+                    if isinstance(payload_voice_id, str):
+                        payload_voice_id = payload_voice_id.strip() or None
+
+                    speech_cfg_voice = speech_cfg.get("voice_id") if isinstance(speech_cfg, dict) else None
+                    if isinstance(speech_cfg_voice, str):
+                        speech_cfg_voice = speech_cfg_voice.strip() or None
+
+                    settings_voice_id = getattr(settings, "voice_id", None)
+                    if isinstance(settings_voice_id, str):
+                        settings_voice_id = settings_voice_id.strip() or None
+
+                    session_voice_id = payload_voice_id or speech_cfg_voice or settings_voice_id
 
                     session = await manager.create_session(
                         session_id=sess_id,
@@ -244,6 +281,7 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                         business_name=biz_name,
                         institution_name=biz_name,
                         agent_name=agent_name,
+                        voice_id=session_voice_id,
                         greeting_message=greeting_msg,
                         goodbye_message=goodbye_msg,
                         system_prompt=sys_prompt,

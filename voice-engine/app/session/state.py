@@ -61,6 +61,9 @@ class EphemeralTurnState:
     state: TurnStateEnum = TurnStateEnum.IDLE
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
     start_time_ms: float = field(default_factory=lambda: time.time() * 1000)
+    # Tracks when this turn actually entered PROCESSING state (STT ended → LLM started).
+    # Different from start_time_ms which records object-creation time (may be before user spoke).
+    processing_started_at_ms: float = 0.0
     user_audio_chunks: List[bytes] = field(default_factory=list)
     raw_transcript: str = ""
     generated_text: str = ""
@@ -88,6 +91,7 @@ class SessionState:
     business_name: str = "Apex University"
     template_type: str = "education"
     agent_name: Optional[str] = None
+    voice_id: Optional[str] = None
     agent_config: Optional[Any] = None
     system_prompt: Optional[str] = None
     greeting_message: Optional[str] = None
@@ -125,7 +129,7 @@ class SessionState:
             active_lang = self.preferred_language or self.language or "en-IN"
             return template.get_greeting(self, lang=active_lang)
         except Exception:
-            return f"Welcome to {self.institution_name}. Which language do you prefer? English, Hindi, or Telugu?"
+            return f"Welcome to {self.institution_name}. How may I help you today?"
 
     def get_goodbye_text(self) -> str:
         """Resolve goodbye text using the active agent template or configuration."""
@@ -186,6 +190,8 @@ class SessionState:
     active_playback_generation_id: Optional[str] = None
     active_playback_turn_id: Optional[str] = None
     active_playback_language: Optional[str] = None
+    active_course: Optional[str] = None
+    is_synthesizing: bool = False
     is_bot_speaking: bool = False
     last_response_text: Optional[str] = None
     turn_count: int = 0
@@ -208,6 +214,8 @@ class SessionState:
     def log_cost_summary(self) -> str:
         """Format and return structured VOICE COST SUMMARY for call telemetry."""
         avg_chars = int(self.tts_chars_count / max(self.tts_requests_count, 1))
+        from app.tts.cache import TTSCacheManager
+        cache_stats = TTSCacheManager.get_stats()
         summary = (
             f"\n=============================\n"
             f"VOICE COST SUMMARY\n"
@@ -217,6 +225,9 @@ class SessionState:
             f"tts_chars={self.tts_chars_count}\n"
             f"tts_avg_chars={avg_chars}\n"
             f"tts_duplicates={self.tts_dedup_hits}\n"
+            f"tts_cache_hits={cache_stats['hits']}\n"
+            f"tts_cache_misses={cache_stats['misses']}\n"
+            f"tts_cache_hit_rate={cache_stats['hit_rate_pct']}%\n"
             f"tts_cancelled={self.tts_cancelled_count}\n"
             f"tts_not_played={self.tts_not_played_count}\n"
             f"tts_retries={self.tts_retries_count}\n"
@@ -232,21 +243,54 @@ class SessionState:
         base = max(float(self.playback_estimated_end_time_ms or 0.0), now_ms)
         self.playback_estimated_end_time_ms = base + duration_ms
 
+    async def _async_delayed_finish(self, delay_sec: float, gen_id: Optional[str]):
+        import asyncio
+        try:
+            await asyncio.sleep(delay_sec)
+            now_ms = time.time() * 1000
+            if (
+                now_ms >= float(self.playback_estimated_end_time_ms or 0.0)
+                or not self.active_playback_generation_id
+                or self.active_playback_generation_id == gen_id
+            ):
+                self.mark_playback_finished(force=True)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"Delayed finish error: {e}")
+
     def mark_playback_finished(self, force: bool = False):
         """Clear greeting/TTS playback flags when physical playout is done (or forced after telephony pacing)."""
+        if self.is_synthesizing and not self.is_generation_cancelled(self.active_playback_generation_id):
+            return
         now_ms = time.time() * 1000
-        self.is_greeting_playing = False
-        self.active_playback_generation_id = None
-        self.active_playback_turn_id = None
-        self.active_playback_language = None
+        existing_task = getattr(self, "_delayed_finish_task", None)
         if force or now_ms >= float(self.playback_estimated_end_time_ms or 0.0):
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
+            self.is_greeting_playing = False
             self.is_bot_speaking = False
+            self.active_playback_generation_id = None
+            self.active_playback_turn_id = None
+            self.active_playback_language = None
             self.playback_estimated_end_time_ms = 0.0
             self.user_has_floor = True
             if hasattr(self, "conversation_state"):
                 self.conversation_state = "LISTENING"
-            if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.IDLE):
+            if self.current_turn and self.current_turn.state in (TurnStateEnum.SPEAKING, TurnStateEnum.IDLE, TurnStateEnum.PROCESSING):
                 self.current_turn.state = TurnStateEnum.LISTENING
+        else:
+            # Playout is still in-flight on telephony. Schedule a background timer to ensure state transitions to LISTENING on completion.
+            current_gen = self.active_playback_generation_id
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
+            remaining_sec = max(0.05, (float(self.playback_estimated_end_time_ms) - now_ms) / 1000.0)
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                self._delayed_finish_task = loop.create_task(self._async_delayed_finish(remaining_sec, current_gen))
+            except RuntimeError:
+                pass
 
     def signal_playback_interrupt(self):
         """Wake the transport writer immediately so it can interrupt playback instead of finishing a pacing sleep."""
@@ -343,6 +387,9 @@ class SessionState:
         self.is_greeting_playing = False
         self.is_bot_speaking = False
         self.user_has_floor = True
+        existing_task = getattr(self, "_delayed_finish_task", None)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
         self.signal_playback_interrupt()
 
     def is_generation_cancelled(self, gen_id: Optional[str]) -> bool:

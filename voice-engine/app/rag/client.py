@@ -65,7 +65,7 @@ class MockRAGProvider(RAGProvider):
                     organization_id="org_apex_univ",
                     agent_id="agent_admission",
                     title="BTech Courses & Fees",
-                    content="Apex University offers BTech Computer Science and Engineering (CSE) with an annual fee of INR 1,50,000. BTech Electronics and Communication (ECE) fee is INR 1,20,000. We only offer B.Tech in CSE and ECE. Other programs like MBA, MBBS, BBA, Law are not offered.",
+                    content="Apex University offers BTech Computer Science and Engineering (CSE) with an annual tuition fee of INR 1,50,000 (total 4-year tuition is INR 6,00,000). BTech Electronics and Communication (ECE) annual tuition fee is INR 1,20,000 (total 4-year tuition is INR 4,80,000). The one-time admission fee is INR 25,000. Annual hostel fee is INR 80,000 including food. We only offer B.Tech in CSE and ECE. Other programs like MBA, MBBS, BBA, Law are not offered.",
                     category="fees"
                 ),
                 KnowledgeItem(
